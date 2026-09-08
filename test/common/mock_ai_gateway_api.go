@@ -17,31 +17,35 @@ package common
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"sync"
+	"sync/atomic"
+
+	"github.com/rainway-ai-gateway/ai-gateway-epp/pkg/innerapi"
 )
 
-// MockAPI is an in-process ai-gateway-api InnerAPI mock covering the four
-// endpoints ai-gateway-epp consumes, with version increments and a failure
-// switch for fail-static scenarios.
+// MockAPI is an in-process ai-gateway-api InnerAPI mock covering the two
+// endpoints ai-gateway-epp consumes (epp_data/config with the full assignment
+// view, gslb_data/cluster_table), with version increments and a failure
+// switch for fail-static scenarios. The retired assignment/report endpoint
+// is kept as a recorder so tests can assert nothing is posted there.
 type MockAPI struct {
 	srv *httptest.Server
 
 	mu sync.Mutex
 
-	assignment  map[string]string
-	assignments map[string]map[string]string // per-instance views, keyed by ?instance=
-	configs     map[string]json.RawMessage
-	table       map[string]any // cluster -> subCluster -> []backend map
-	fail        bool
+	eppConfig  map[string]json.RawMessage
+	assignment map[string]innerapi.AssignmentEntry // full view: cluster -> {primary, standby}
+	table      map[string]any                      // cluster -> subCluster -> []backend map
+	fail       bool
 
-	lastInstance string // instance query param of the current assignment request
+	defaultInstance string // instance id SetAssignment builds the full view for
 
 	version int64
 
-	reportsMu sync.Mutex
-	reports   [][]byte
+	reportPosts atomic.Int64
 
 	// Request observation: per-path request count and last version query
 	// param, for incremental-sync assertions.
@@ -57,29 +61,22 @@ func NewMockAPI(t fatalT) *MockAPI {
 		lastVersion: map[string]string{},
 	}
 	mux := http.NewServeMux()
-	mux.HandleFunc("/configs/epp_data/assignment", m.handleVersioned(func() (any, int64) {
+	mux.HandleFunc("/configs/epp_data/config", m.handleVersioned(func() (any, int64) {
 		m.mu.Lock()
 		defer m.mu.Unlock()
-		if inst := m.lastInstance; inst != "" && m.assignments != nil {
-			if view, ok := m.assignments[inst]; ok {
-				return view, m.version
-			}
+		if m.eppConfig == nil && m.assignment == nil {
+			return nil, m.version
 		}
-		return m.assignment, m.version
+		return innerapi.EppDataConfig{
+			EppConfig:  m.eppConfig,
+			Assignment: m.assignment,
+		}, m.version
 	}))
 	mux.HandleFunc("/configs/epp_data/assignment/report", func(w http.ResponseWriter, r *http.Request) {
-		body := make([]byte, r.ContentLength)
-		r.Body.Read(body)
-		m.reportsMu.Lock()
-		m.reports = append(m.reports, body)
-		m.reportsMu.Unlock()
+		io.Copy(io.Discard, r.Body)
+		m.reportPosts.Add(1)
 		w.WriteHeader(http.StatusOK)
 	})
-	mux.HandleFunc("/configs/epp_data/picker_config", m.handleVersioned(func() (any, int64) {
-		m.mu.Lock()
-		defer m.mu.Unlock()
-		return m.configs, m.version
-	}))
 	mux.HandleFunc("/configs/gslb_data/cluster_table", m.handleVersioned(func() (any, int64) {
 		m.mu.Lock()
 		defer m.mu.Unlock()
@@ -102,19 +99,57 @@ func (m *MockAPI) SetFail(v bool) {
 	m.fail = v
 }
 
-// SetAssignment replaces the assignment view and bumps the version.
-func (m *MockAPI) SetAssignment(v map[string]string) {
+// SetDefaultInstance records the instance id SetAssignment gives roles to.
+// NewEnv sets it to the env's instance id.
+func (m *MockAPI) SetDefaultInstance(id string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.assignment = v
+	m.defaultInstance = id
+}
+
+// SetAssignment replaces the assignment full view, giving the default
+// instance the given role per cluster ("primary" or "standby"); a standby
+// entry leaves the primary empty (single-sided view, as a misconfigured pool
+// would produce).
+func (m *MockAPI) SetAssignment(roles map[string]string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.assignment = fullView(m.defaultInstance, roles)
 	m.version++
 }
 
-// SetConfigs replaces picker_config and bumps the version.
-func (m *MockAPI) SetConfigs(v map[string]json.RawMessage) {
+// SetAssignmentView installs a full assignment view (cluster -> {primary,
+// standby}) directly, e.g. for multi-instance groups.
+func (m *MockAPI) SetAssignmentView(view map[string]innerapi.AssignmentEntry) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.configs = v
+	m.assignment = view
+	m.version++
+}
+
+// fullView expands per-instance roles into the full assignment view.
+func fullView(self string, roles map[string]string) map[string]innerapi.AssignmentEntry {
+	out := make(map[string]innerapi.AssignmentEntry, len(roles))
+	for cluster, role := range roles {
+		e := innerapi.AssignmentEntry{}
+		if role == "standby" {
+			e.Standby = sp(self)
+		} else {
+			e.Primary = sp(self)
+		}
+		out[cluster] = e
+	}
+	return out
+}
+
+// sp returns a pointer to s (tiny helper for view construction).
+func sp(s string) *string { return &s }
+
+// SetEppConfig replaces the epp_config section and bumps the version.
+func (m *MockAPI) SetEppConfig(v map[string]json.RawMessage) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.eppConfig = v
 	m.version++
 }
 
@@ -135,14 +170,9 @@ func (m *MockAPI) SetClusterTable(v map[string]map[string][]map[string]any) {
 	m.version++
 }
 
-// Reports returns copies of the readiness reports received so far.
-func (m *MockAPI) Reports() [][]byte {
-	m.reportsMu.Lock()
-	defer m.reportsMu.Unlock()
-	out := make([][]byte, len(m.reports))
-	copy(out, m.reports)
-	return out
-}
+// ReportCount returns how many POSTs the retired assignment/report endpoint
+// has received; the readiness report was removed, so this must stay 0.
+func (m *MockAPI) ReportCount() int64 { return m.reportPosts.Load() }
 
 func (m *MockAPI) handleVersioned(get func() (any, int64)) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -153,9 +183,6 @@ func (m *MockAPI) handleVersioned(get func() (any, int64)) http.HandlerFunc {
 
 		m.mu.Lock()
 		fail := m.fail
-		if r.URL.Path == "/configs/epp_data/assignment" {
-			m.lastInstance = r.URL.Query().Get("instance")
-		}
 		m.mu.Unlock()
 		if fail {
 			w.WriteHeader(http.StatusInternalServerError)
@@ -187,16 +214,6 @@ func (m *MockAPI) LastVersionQuery(path string) string {
 	m.reqMu.Lock()
 	defer m.reqMu.Unlock()
 	return m.lastVersion[path]
-}
-
-// SetAssignments installs per-instance assignment views (keyed by the
-// instance id epp sends as ?instance=) and bumps the version. Per-instance
-// views take precedence over the global SetAssignment view.
-func (m *MockAPI) SetAssignments(views map[string]map[string]string) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.assignments = views
-	m.version++
 }
 
 // Backend is a cluster_table backend entry.

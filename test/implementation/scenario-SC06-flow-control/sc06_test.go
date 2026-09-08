@@ -67,7 +67,7 @@ func enableFlowControl(t *testing.T, e *common.Env, cluster string) {
 	if v1 == "" {
 		t.Fatal("no compiled engine before flow-control swap")
 	}
-	e.API.SetConfigs(map[string]json.RawMessage{cluster: fcConfig(cluster, "30s", 1)})
+	e.API.SetEppConfig(map[string]json.RawMessage{cluster: fcConfig(cluster, "30s", 1)})
 	common.WaitFor(t, 20*time.Second, "flow-control engine compiled", func() bool {
 		return common.EngineVersion(common.FetchMetrics(t, e.EPP.MetricsAddr), cluster) != v1
 	})
@@ -142,7 +142,7 @@ func TestTC02_InvalidFlowControlConfig(t *testing.T) {
   },
   "requestHandler": {"parsers": [{"pluginRef": "openai-parser"}]}
 }`))
-	e.API.SetConfigs(map[string]json.RawMessage{"cluster-a": invalid})
+	e.API.SetEppConfig(map[string]json.RawMessage{"cluster-a": invalid})
 
 	common.WaitFor(t, 20*time.Second, "invalid reload recorded", func() bool {
 		text := common.FetchMetrics(t, e.EPP.MetricsAddr)

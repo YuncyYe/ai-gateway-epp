@@ -22,6 +22,7 @@ ai_epp_poller_last_sync_timestamp{poller}         gauge     FR-O2
 ai_epp_poller_failures_total{poller}              counter   FR-O2
 ai_epp_poller_backoff_state{poller}               gauge     FR-O2
 ai_epp_cell_state{cluster, role, state}           gauge     FR-O4（双活跃告警数据源）
+ai_epp_assignment_no_match                        gauge     实例未命中 assignment 任何角色（部署排查，启动即告警）
 ai_epp_demux_errors_total{reason}                 counter   排障
 ai_epp_drain_duration_seconds{cluster}            histogram 排障
 ```
@@ -36,15 +37,15 @@ ai_epp_drain_duration_seconds{cluster}            histogram 排障
 
 | 层 | 内容 |
 |---|---|
-| 单元 | diff 算法（增删改 / Weight=0 摘除 / Delete 先于 Upsert 顺序契约）、角色矩阵六转换、编译失败路径、demux metadata 解析 |
+| 单元 | diff 算法（增删改 / Weight=0 摘除 / Delete 先于 Upsert 顺序契约）、`resolveRole` 自匹配全分支（primary 命中 / standby 命中 / 未命中 / `standby=null` 单实例组 / 空段）、assignment diff → Ensure/Promote/Demote/Drop 调用序列、无上报断言（innerapi mock 零 report 调用）、角色矩阵六转换、编译失败路径、demux metadata 解析 |
 | llm-d 引擎 | 复用其既有测试，不重复；集成面只测装配正确性 |
-| 集成（fake innerapi） | httptest 提供三接口 + version 增量；验证：新 cluster 自动建 Cell → Ready → 可调度；配置变更热生效（新旧引擎行为可区分）；kill 主备切换路径 |
-| 契约 | picker_config / assignment 的 JSON 与 ai-gateway-api 侧样例对拍（golden file） |
+| 集成（fake innerapi） | httptest 提供两接口（cluster_table + epp_data/config）+ version 增量；验证：新 cluster 自动建 Cell → Ready → 可调度；配置变更热生效（新旧引擎行为可区分）；kill 主备切换路径；实例 id 不在池中 → 无 cell + 告警 |
+| 契约 | epp_data/config（epp_config + assignment 两段）的 JSON 与 ai-gateway-api 侧样例对拍（golden file，契约见《EPP配置定义说明-epp_config.md》） |
 | 性能 | demux 开销基准（每请求 Load vs 基线）；Cell 数规模化（100 cluster）内存/调度延迟 |
 
 ## 4. 配置与部署形态（补充）
 
-- 每实例一个进程级 Config（见 01 号文档 §2），cluster 级配置全部来自 picker_config。
+- 每实例一个进程级 Config（见 01 号文档 §2），cluster 级配置全部来自 `epp_data/config`（epp_config 段）。
 - 实例组拓扑不进进程配置：实例只知道自己是谁（InstanceID），角色全听 assignment——**实例可互换**，组内任意实例可被分配器互换角色（与 NFR-5 零接触一致）。
 
 ## 5. Spike 验证清单（M0 前置）

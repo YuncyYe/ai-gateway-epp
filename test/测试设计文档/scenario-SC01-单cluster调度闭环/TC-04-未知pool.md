@@ -17,7 +17,7 @@
 ## 前置条件
 
 1. harness 已构建 epp 二进制；inference-sim 二进制可用。
-2. mock API 已配置 assignment（仅 `cluster-a=primary`，**不含** `cluster-ghost`）、picker_config（cluster-a 最小配置）、cluster_table（1 个 sim 后端 `a0`，Weight=50）。
+2. mock API 已配置 assignment 全量视图（仅 `cluster-a`（本实例 primary），**不含** `cluster-ghost`）、epp_config（cluster-a 最小配置）、cluster_table（1 个 sim 后端 `a0`，Weight=50）。
 3. epp 启动并就绪（health=SERVING）。
 
 ## 测试步骤

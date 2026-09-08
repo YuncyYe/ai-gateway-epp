@@ -77,12 +77,10 @@ func run() error {
 		_, ok := manager.Get(cell.Key(cluster))
 		return ok
 	}, nil)
-	configPoller := poller.NewConfigPoller(client, manager)
-	assignmentWatcher := poller.NewAssignmentWatcher(client, cfg.InstanceID, manager)
+	eppDataWatcher := poller.NewEppDataWatcher(client, cfg.InstanceID, manager, logger)
 
 	discoveryLoop := poller.New("discovery", discoverySource, discoverySource.Handle, poller.Options{Interval: cfg.PollInterval, Timeout: cfg.PollTimeout, Logger: logger})
-	configLoop := poller.New("config", configPoller, configPoller.Handle, poller.Options{Interval: cfg.PollInterval, Timeout: cfg.PollTimeout, Logger: logger})
-	assignmentLoop := poller.New("assignment", assignmentWatcher, assignmentWatcher.Handle, poller.Options{Interval: cfg.PollInterval, Timeout: cfg.PollTimeout, Logger: logger})
+	eppDataLoop := poller.New("epp_data", eppDataWatcher, eppDataWatcher.Handle, poller.Options{Interval: cfg.PollInterval, Timeout: cfg.PollTimeout, Logger: logger})
 
 	health := &healthServer{manager: manager}
 
@@ -121,12 +119,11 @@ func run() error {
 		return nil
 	})
 	g.Go(func() error { return discoveryLoop.Start(gctx) })
-	g.Go(func() error { return configLoop.Start(gctx) })
-	g.Go(func() error { return assignmentLoop.Start(gctx) })
+	g.Go(func() error { return eppDataLoop.Start(gctx) })
 	g.Go(func() error {
-		// Readiness gate: assignment synced, then every assigned cell ready.
+		// Readiness gate: epp_data synced, then every assigned cell ready.
 		select {
-		case <-assignmentLoop.FirstSync():
+		case <-eppDataLoop.FirstSync():
 		case <-gctx.Done():
 			return nil
 		}

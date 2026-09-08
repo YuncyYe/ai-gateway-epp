@@ -46,9 +46,9 @@ func (e *Env) Close(t *testing.T) {
 }
 
 type envConfig struct {
-	eppArgs  []string
-	pickerFn func(cluster string) json.RawMessage
-	simFake  map[string]string // logical sim name -> initial --fake-metrics JSON
+	eppArgs      []string
+	eppConfigFn  func(cluster string) json.RawMessage
+	simFake      map[string]string // logical sim name -> initial --fake-metrics JSON
 }
 
 // EnvOption customizes NewEnv.
@@ -59,10 +59,10 @@ func WithEppArgs(args ...string) EnvOption {
 	return func(c *envConfig) { c.eppArgs = append(c.eppArgs, args...) }
 }
 
-// WithPickerConfigFn overrides the per-cluster picker config generator
-// (default: PickerConfig).
-func WithPickerConfigFn(fn func(cluster string) json.RawMessage) EnvOption {
-	return func(c *envConfig) { c.pickerFn = fn }
+// WithEppConfigFn overrides the per-cluster epp_config generator
+// (default: EppConfig).
+func WithEppConfigFn(fn func(cluster string) json.RawMessage) EnvOption {
+	return func(c *envConfig) { c.eppConfigFn = fn }
 }
 
 // WithSimFakeMetrics starts the named logical sims with fake metrics enabled
@@ -75,10 +75,10 @@ func WithSimFakeMetrics(fake map[string]string) EnvOption {
 // NewEnv starts mock API + one sim per logical name + epp. clusters maps a
 // cluster name to the logical sim names backing it; a logical name appearing
 // in multiple clusters shares one sim process. Every cluster is assigned
-// "primary" to this instance and gets a minimal working picker config.
+// "primary" to this instance and gets a minimal working epp_config.
 func NewEnv(t *testing.T, instanceID string, clusters map[string][]string, opts ...EnvOption) *Env {
 	t.Helper()
-	cfg := &envConfig{pickerFn: func(cluster string) json.RawMessage { return PickerConfig(cluster, false) }}
+	cfg := &envConfig{eppConfigFn: func(cluster string) json.RawMessage { return EppConfig(cluster, false) }}
 	for _, o := range opts {
 		o(cfg)
 	}
@@ -122,10 +122,11 @@ func NewEnv(t *testing.T, instanceID string, clusters map[string][]string, opts 
 		}
 		table[cluster] = map[string][]map[string]any{"sub-1": BackendMap(backends...)}
 		assign[cluster] = "primary"
-		configs[cluster] = cfg.pickerFn(cluster)
+		configs[cluster] = cfg.eppConfigFn(cluster)
 	}
+	e.API.SetDefaultInstance(instanceID)
 	e.API.SetAssignment(assign)
-	e.API.SetConfigs(configs)
+	e.API.SetEppConfig(configs)
 	e.API.SetClusterTable(table)
 
 	e.EPP = StartEPP(t, logDir, e.API.Addr(), instanceID, cfg.eppArgs...)

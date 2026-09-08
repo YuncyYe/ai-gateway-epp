@@ -97,7 +97,7 @@ func stick(t *testing.T, e *common.Env, sessionID string, n int) string {
 func TestTC01_SessionSticks(t *testing.T) {
 	e := common.NewEnv(t, "epp-sc12-tc01", map[string][]string{
 		"cluster-a": {"a0", "b0"},
-	}, common.WithPickerConfigFn(sessionAffinityConfig))
+	}, common.WithEppConfigFn(sessionAffinityConfig))
 	defer e.Close(t)
 
 	pinned := stick(t, e, "sess-1", 8)
@@ -121,7 +121,7 @@ func TestTC01_SessionSticks(t *testing.T) {
 func TestTC02_DistinctSessionsIndependent(t *testing.T) {
 	e := common.NewEnv(t, "epp-sc12-tc02", map[string][]string{
 		"cluster-a": {"a0", "b0"},
-	}, common.WithPickerConfigFn(sessionAffinityConfig))
+	}, common.WithEppConfigFn(sessionAffinityConfig))
 	defer e.Close(t)
 
 	stick(t, e, "sess-a", 6)
@@ -137,7 +137,7 @@ func TestTC02_DistinctSessionsIndependent(t *testing.T) {
 func TestTC03_BoundBackendDrainedMigrates(t *testing.T) {
 	e := common.NewEnv(t, "epp-sc12-tc03", map[string][]string{
 		"cluster-a": {"a0", "b1"},
-	}, common.WithPickerConfigFn(sessionAffinityConfig))
+	}, common.WithEppConfigFn(sessionAffinityConfig))
 	defer e.Close(t)
 
 	a0 := e.ClusterSims["cluster-a"][0]

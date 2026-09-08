@@ -61,7 +61,7 @@ func f64(v float64) *float64 { return &v }
 func TestTC01_OverloadedEndpointFiltered(t *testing.T) {
 	e := common.NewEnv(t, "epp-sc13-tc01", map[string][]string{
 		"cluster-a": {"a0", "b0"},
-	}, common.WithPickerConfigFn(func(c string) json.RawMessage {
+	}, common.WithEppConfigFn(func(c string) json.RawMessage {
 		return utilFilterConfig(c, 0.9, false)
 	}), common.WithSimFakeMetrics(map[string]string{"b0": "{}"}))
 	defer e.Close(t)
@@ -112,7 +112,7 @@ func TestTC01_OverloadedEndpointFiltered(t *testing.T) {
 func TestTC02_AllFilteredFailsClosed(t *testing.T) {
 	e := common.NewEnv(t, "epp-sc13-tc02", map[string][]string{
 		"cluster-a": {"a0", "b0"},
-	}, common.WithPickerConfigFn(func(c string) json.RawMessage {
+	}, common.WithEppConfigFn(func(c string) json.RawMessage {
 		return utilFilterConfig(c, 0.9, false)
 	}), common.WithSimFakeMetrics(map[string]string{"a0": "{}", "b0": "{}"}))
 	defer e.Close(t)
@@ -141,7 +141,7 @@ func TestTC02_AllFilteredFailsClosed(t *testing.T) {
 func TestTC03_FallbackOnEmpty(t *testing.T) {
 	e := common.NewEnv(t, "epp-sc13-tc03", map[string][]string{
 		"cluster-a": {"a0", "b0"},
-	}, common.WithPickerConfigFn(func(c string) json.RawMessage {
+	}, common.WithEppConfigFn(func(c string) json.RawMessage {
 		return utilFilterConfig(c, 0.9, true)
 	}), common.WithSimFakeMetrics(map[string]string{"a0": "{}", "b0": "{}"}))
 	defer e.Close(t)

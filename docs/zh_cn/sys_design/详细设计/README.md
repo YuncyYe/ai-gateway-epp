@@ -6,7 +6,7 @@
 |---|---|---|
 | [详细设计-01-包结构与进程配置](详细设计-01-包结构与进程配置.md) | 仓库包结构、依赖方向、进程级启动配置、部署形态 | §3.1、§8 |
 | [详细设计-02-Cell管理与热加载](详细设计-02-Cell管理与热加载.md) | Cell/Manager/Engine 数据结构、角色转换、生命周期状态机、编译切换、drain、并发模型 | §3.2、§3.6、§4.2 |
-| [详细设计-03-Poller与InnerAPI对接](详细设计-03-Poller与InnerAPI对接.md) | 通用轮询框架、ClusterDiscovery/ConfigPoller/AssignmentWatcher 算法、fail-static | §3.4、§5 |
+| [详细设计-03-Poller与InnerAPI对接](详细设计-03-Poller与InnerAPI对接.md) | 通用轮询框架、ClusterDiscovery/EppDataWatcher 算法（epp_data/config 两段消费 + 自匹配）、fail-static | §3.4、§5 |
 | [详细设计-04-Demux与请求路径](详细设计-04-Demux与请求路径.md) | pool metadata 路由、多 Cell ext-proc server、请求面错误语义 | §3.3、§4.1 |
 | [详细设计-05-错误处理-可观测-测试与Spike](详细设计-05-错误处理-可观测-测试与Spike.md) | 错误约定总表、指标清单、测试策略、部署形态补充、M0 spike 验证清单 | §6、§7、§11 |
 

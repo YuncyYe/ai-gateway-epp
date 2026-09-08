@@ -36,7 +36,7 @@ func TestTC01_NewClusterAdopted(t *testing.T) {
 	})
 	defer e.Close(t)
 
-	// Start a new backend and publish cluster-b in assignment, picker_config
+	// Start a new backend and publish cluster-b in assignment, epp_config
 	// and cluster_table.
 	logDir := t.TempDir()
 	proc, addr := common.StartSim(t, logDir, "sim-b0", "sim-model")
@@ -56,9 +56,9 @@ func TestTC01_NewClusterAdopted(t *testing.T) {
 		return common.BackendMap(bs...)
 	}
 	e.API.SetAssignment(map[string]string{"cluster-a": "primary", "cluster-b": "primary"})
-	e.API.SetConfigs(map[string]json.RawMessage{
-		"cluster-a": common.PickerConfig("cluster-a", false),
-		"cluster-b": common.PickerConfig("cluster-b", false),
+	e.API.SetEppConfig(map[string]json.RawMessage{
+		"cluster-a": common.EppConfig("cluster-a", false),
+		"cluster-b": common.EppConfig("cluster-b", false),
 	})
 	e.API.SetClusterTable(map[string]map[string][]map[string]any{
 		"cluster-a": {"sub-1": backends("cluster-a", e.ClusterSims["cluster-a"])},
@@ -72,17 +72,13 @@ func TestTC01_NewClusterAdopted(t *testing.T) {
 		return errB == nil && epB == addr && errA == nil && epA == e.ClusterSims["cluster-a"][0]
 	})
 
-	// The new cell reports itself.
-	common.WaitFor(t, 20*time.Second, "report carries cluster-b", func() bool {
-		reports := e.API.Reports()
-		if len(reports) == 0 {
-			return false
-		}
-		return strings.Contains(string(reports[len(reports)-1]), `"key":"cluster-b"`)
-	})
+	// The retired readiness report must stay unused.
+	if n := e.API.ReportCount(); n != 0 {
+		t.Fatalf("readiness report posted %d times, want 0", n)
+	}
 }
 
-// TestTC02_UnassignedConfigIgnored: a picker_config entry for a cluster this
+// TestTC02_UnassignedConfigIgnored: an epp_config entry for a cluster this
 // instance is not assigned must not create a cell and must not disturb
 // assigned clusters (FR-C2 isolation).
 func TestTC02_UnassignedConfigIgnored(t *testing.T) {
@@ -91,9 +87,9 @@ func TestTC02_UnassignedConfigIgnored(t *testing.T) {
 	})
 	defer e.Close(t)
 
-	e.API.SetConfigs(map[string]json.RawMessage{
-		"cluster-a":     common.PickerConfig("cluster-a", false),
-		"cluster-ghost": common.PickerConfig("cluster-ghost", false),
+	e.API.SetEppConfig(map[string]json.RawMessage{
+		"cluster-a":     common.EppConfig("cluster-a", false),
+		"cluster-ghost": common.EppConfig("cluster-ghost", false),
 	})
 
 	// Let several poll intervals pass.
@@ -103,12 +99,8 @@ func TestTC02_UnassignedConfigIgnored(t *testing.T) {
 	if strings.Contains(text, `"cluster-ghost"`) && common.EngineVersion(text, "cluster-ghost") != "" {
 		t.Fatal("engine compiled for unassigned cluster-ghost")
 	}
-	reports := e.API.Reports()
-	if len(reports) == 0 {
-		t.Fatal("no report received")
-	}
-	if strings.Contains(string(reports[len(reports)-1]), "cluster-ghost") {
-		t.Fatal("report carries unassigned cluster-ghost")
+	if n := e.API.ReportCount(); n != 0 {
+		t.Fatalf("readiness report posted %d times, want 0", n)
 	}
 
 	// The assigned cluster keeps serving.

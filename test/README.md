@@ -8,7 +8,7 @@
 test/
 ├── common/                  # 公共 harness
 │   ├── process_env.go       # epp / inference-sim 二进制编译缓存、启动、停止、就绪等待
-│   ├── mock_ai_gateway_api.go  # ai-gateway-api InnerAPI mock（assignment/picker_config/cluster_table/report）
+│   ├── mock_ai_gateway_api.go  # ai-gateway-api InnerAPI mock（epp_data/config（epp_config + assignment 全量视图）/cluster_table；退役 report 路径保留为计数器）
 │   ├── sim_backend.go       # inference-sim 实例池管理（多后端、命中统计）
 │   └── util.go              # FindFreePort / WaitForTCP 等
 ├── implementation/          # 测试代码，每个场景一个独立包

@@ -26,7 +26,7 @@ import (
 
 const chatBody = `{"model":"sim-model","messages":[{"role":"user","content":"hello from sc07"}],"max_tokens":8}`
 
-const configPath = "/configs/epp_data/picker_config"
+const configPath = "/configs/epp_data/config"
 
 // TestTC01_IncrementalIdle: in steady state pollers keep sending version
 // params and idle cheaply (FR-D1): requests continue, Data:null rounds cause
@@ -62,7 +62,7 @@ func TestTC01_IncrementalIdle(t *testing.T) {
 	}
 
 	// Version bump with identical content: sync advances, no recompile.
-	e.API.SetConfigs(map[string]json.RawMessage{"cluster-a": common.PickerConfig("cluster-a", false)})
+	e.API.SetEppConfig(map[string]json.RawMessage{"cluster-a": common.EppConfig("cluster-a", false)})
 	time.Sleep(1 * time.Second)
 	text = common.FetchMetrics(t, e.EPP.MetricsAddr)
 	if got := common.EngineVersion(text, "cluster-a"); got != v1 {
@@ -89,7 +89,7 @@ func TestTC02_PollerHealthMetrics(t *testing.T) {
 	defer e.Close(t)
 
 	text := common.FetchMetrics(t, e.EPP.MetricsAddr)
-	for _, poller := range []string{"discovery", "config", "assignment"} {
+	for _, poller := range []string{"discovery", "epp_data"} {
 		if common.MetricValue(text, `ai_epp_poller_last_sync_timestamp{poller="`+poller+`"}`) == 0 {
 			t.Fatalf("missing last sync timestamp for poller %q", poller)
 		}
@@ -98,8 +98,8 @@ func TestTC02_PollerHealthMetrics(t *testing.T) {
 	e.API.SetFail(true)
 	common.WaitFor(t, 15*time.Second, "failure counters increment while API down", func() bool {
 		text := common.FetchMetrics(t, e.EPP.MetricsAddr)
-		return common.MetricValue(text, `ai_epp_poller_failures_total{poller="config"}`) > 0 &&
-			common.MetricValue(text, `ai_epp_poller_backoff_state{poller="config"}`) == 1
+		return common.MetricValue(text, `ai_epp_poller_failures_total{poller="epp_data"}`) > 0 &&
+			common.MetricValue(text, `ai_epp_poller_backoff_state{poller="epp_data"}`) == 1
 	})
 	common.WaitFor(t, 15*time.Second, "discovery poller in backoff", func() bool {
 		return common.MetricValue(common.FetchMetrics(t, e.EPP.MetricsAddr), `ai_epp_poller_backoff_state{poller="discovery"}`) == 1
@@ -108,7 +108,7 @@ func TestTC02_PollerHealthMetrics(t *testing.T) {
 	e.API.SetFail(false)
 	common.WaitFor(t, 15*time.Second, "backoff cleared after recovery", func() bool {
 		text := common.FetchMetrics(t, e.EPP.MetricsAddr)
-		return common.MetricValue(text, `ai_epp_poller_backoff_state{poller="config"}`) == 0 &&
-			common.MetricValue(text, `ai_epp_poller_last_sync_timestamp{poller="config"}`) > 0
+		return common.MetricValue(text, `ai_epp_poller_backoff_state{poller="epp_data"}`) == 0 &&
+			common.MetricValue(text, `ai_epp_poller_last_sync_timestamp{poller="epp_data"}`) > 0
 	})
 }

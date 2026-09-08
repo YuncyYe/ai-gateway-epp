@@ -87,7 +87,7 @@ func bothHit(t *testing.T, e *common.Env, a, b string) bool {
 func TestTC01_KVCacheUtilizationBias(t *testing.T) {
 	e := common.NewEnv(t, "epp-sc10-tc01", map[string][]string{
 		"cluster-a": {"a0", "b0"},
-	}, common.WithPickerConfigFn(func(c string) json.RawMessage {
+	}, common.WithEppConfigFn(func(c string) json.RawMessage {
 		return singleScorerConfig(c, "kv-scorer", "kv-cache-utilization-scorer")
 	}), common.WithSimFakeMetrics(map[string]string{"b0": "{}"}))
 	defer e.Close(t)
@@ -115,7 +115,7 @@ func TestTC01_KVCacheUtilizationBias(t *testing.T) {
 func TestTC02_QueueDepthBias(t *testing.T) {
 	e := common.NewEnv(t, "epp-sc10-tc02", map[string][]string{
 		"cluster-a": {"a0", "b0"},
-	}, common.WithPickerConfigFn(func(c string) json.RawMessage {
+	}, common.WithEppConfigFn(func(c string) json.RawMessage {
 		return singleScorerConfig(c, "queue-scorer", "queue-scorer")
 	}), common.WithSimFakeMetrics(map[string]string{"b0": "{}"}))
 	defer e.Close(t)
@@ -143,7 +143,7 @@ func TestTC02_QueueDepthBias(t *testing.T) {
 func TestTC03_LoadClearsBackToBalanced(t *testing.T) {
 	e := common.NewEnv(t, "epp-sc10-tc03", map[string][]string{
 		"cluster-a": {"a0", "b0"},
-	}, common.WithPickerConfigFn(func(c string) json.RawMessage {
+	}, common.WithEppConfigFn(func(c string) json.RawMessage {
 		return singleScorerConfig(c, "kv-scorer", "kv-cache-utilization-scorer")
 	}), common.WithSimFakeMetrics(map[string]string{"b0": "{}"}))
 	defer e.Close(t)
