@@ -56,8 +56,9 @@ type prometheusCounter interface {
 	Inc()
 }
 
-// NewClusterDiscovery creates the discovery source. assigned filters out
-// clusters this instance does not hold (they are counted and skipped).
+// NewClusterDiscovery creates the discovery source. assigned identifies
+// clusters this instance does not hold; they are kept in the hub anyway (see
+// Handle) and only counted via unassigned.
 func NewClusterDiscovery(client *innerapi.Client, hub *clustertable.Hub, assigned func(cluster string) bool, unassigned prometheusCounter) *ClusterDiscovery {
 	return &ClusterDiscovery{client: client, hub: hub, assigned: assigned, unassigned: unassigned}
 }
@@ -98,7 +99,12 @@ func (d *ClusterDiscovery) Fetch(ctx context.Context, version string) (bool, str
 }
 
 // Handle implements Handle: replace the hub content with the fetched table so
-// clusters that disappeared are cleared as well.
+// clusters that disappeared are cleared as well. Clusters without a local
+// cell are kept in the hub (only counted): the poller only invokes Handle on
+// content changes, so dropping them here would race cell creation — a cell
+// created by a later epp_data sync would never see endpoints delivered by an
+// earlier cluster_table version. Cell-level discovery reads only its own
+// cluster's snapshot, so extra entries are inert.
 func (d *ClusterDiscovery) Handle(ctx context.Context, desired map[string][]fwkdl.EndpointMetadata) error {
 	filtered := make(map[string][]fwkdl.EndpointMetadata, len(desired))
 	for cluster, eps := range desired {
@@ -106,7 +112,6 @@ func (d *ClusterDiscovery) Handle(ctx context.Context, desired map[string][]fwkd
 			if d.unassigned != nil {
 				d.unassigned.Inc()
 			}
-			continue
 		}
 		filtered[cluster] = eps
 	}
