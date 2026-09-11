@@ -168,7 +168,7 @@ type fakeCounter struct{ n atomic.Int32 }
 
 func (f *fakeCounter) Inc() { f.n.Add(1) }
 
-func TestClusterDiscoveryHandleFiltersUnassigned(t *testing.T) {
+func TestClusterDiscoveryHandleKeepsUnassigned(t *testing.T) {
 	hub := clustertable.NewHub()
 	var skipped fakeCounter
 	assigned := func(cluster string) bool { return cluster == "c1" }
@@ -191,8 +191,12 @@ func TestClusterDiscoveryHandleFiltersUnassigned(t *testing.T) {
 	if len(got) != 1 || got[0].ID.Name != "b1" {
 		t.Fatalf("c1 = %v", got)
 	}
-	if got, _ := hub.Snapshot("c2"); got != nil {
-		t.Fatalf("c2 = %v, want filtered out", got)
+	// Unassigned clusters stay in the hub: Handle only runs on content
+	// changes, so dropping them would race cell creation and the new cell
+	// would never receive endpoints from an earlier table version.
+	got, _ = hub.Snapshot("c2")
+	if len(got) != 1 || got[0].ID.Name != "b2" {
+		t.Fatalf("c2 = %v, want kept", got)
 	}
 	if skipped.n.Load() != 1 {
 		t.Fatalf("skip counter = %d, want 1", skipped.n.Load())
