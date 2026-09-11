@@ -17,7 +17,7 @@
 ## 前置条件
 
 1. harness 已构建 epp 二进制；inference-sim 二进制可用（缺失则 skip）。
-2. mock API 已配置 assignment（cluster-a=primary）、cluster_table（cluster-a = a0、b0）、picker_config（ep-discover + util-filter + max-score-picker，无 scorer）。
+2. mock API 已配置 assignment 全量视图（cluster-a → 本实例 primary）、cluster_table（cluster-a = a0、b0）、epp_config（ep-discover + util-filter + max-score-picker，无 scorer）。
 3. util-filter 参数：`conditions=[{"metric":"kv-cache-utilization","maxValue":0.9}]`，`fallbackOnEmpty=false`。
 4. 两个 sim 启动时均启用 fake-metrics（初始 `{}`）。
 

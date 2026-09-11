@@ -50,6 +50,9 @@ import (
 	"github.com/rainway-ai-gateway/ai-gateway-epp/pkg/poller"
 )
 
+// sp returns a pointer to s (helper for view construction).
+func sp(s string) *string { return &s }
+
 // registerTestPlugins registers the in-tree plugins the test config uses.
 // Registration is global and idempotent.
 func registerTestPlugins(hub *clustertable.Hub) {
@@ -69,35 +72,40 @@ func registerTestPlugins(hub *clustertable.Hub) {
 	fwkplugin.Register(clustertable.PluginType, fwkplugin.StabilityBeta, clustertable.NewFactory(hub))
 }
 
-// fakeAPI serves assignment, picker_config and cluster_table with version
-// increments, mirroring the InnerAPI envelope contract.
+// fakeAPI serves epp_data/config (compiled per-cluster configs plus the full
+// assignment view) and cluster_table with version increments, mirroring the
+// InnerAPI envelope contract. The retired assignment/report endpoint is kept
+// as a counter: nothing may post there.
 type fakeAPI struct {
 	srv *httptest.Server
 
-	assignmentVersion atomic.Int64
-	assignment        atomic.Value // assignment.View
+	version atomic.Int64
 
-	configVersion atomic.Int64
-	config        atomic.Value // map[string]json.RawMessage
+	config     atomic.Value // map[string]json.RawMessage (epp_config section)
+	assignment atomic.Value // map[string]innerapi.AssignmentEntry (full view)
+	table      atomic.Value // poller-facing JSON document
 
-	tableVersion atomic.Int64
-	table        atomic.Value // poller-facing JSON document
+	reportPosts atomic.Int64
 }
 
 func newFakeAPI(t *testing.T) *fakeAPI {
 	f := &fakeAPI{}
+	f.config.Store(map[string]json.RawMessage{})
+	f.assignment.Store(map[string]innerapi.AssignmentEntry{})
 	mux := http.NewServeMux()
-	mux.HandleFunc("/configs/epp_data/assignment", func(w http.ResponseWriter, r *http.Request) {
-		writeVersioned(w, f.assignmentVersion.Load(), f.assignment.Load())
+	mux.HandleFunc("/configs/epp_data/config", func(w http.ResponseWriter, r *http.Request) {
+		cfg := innerapi.EppDataConfig{
+			EppConfig:  f.config.Load().(map[string]json.RawMessage),
+			Assignment: f.assignment.Load().(map[string]innerapi.AssignmentEntry),
+		}
+		writeVersioned(w, f.version.Load(), cfg)
 	})
 	mux.HandleFunc("/configs/epp_data/assignment/report", func(w http.ResponseWriter, r *http.Request) {
+		f.reportPosts.Add(1)
 		w.WriteHeader(http.StatusOK)
 	})
-	mux.HandleFunc("/configs/epp_data/picker_config", func(w http.ResponseWriter, r *http.Request) {
-		writeVersioned(w, f.configVersion.Load(), f.config.Load())
-	})
 	mux.HandleFunc("/configs/gslb_data/cluster_table", func(w http.ResponseWriter, r *http.Request) {
-		writeVersioned(w, f.tableVersion.Load(), f.table.Load())
+		writeVersioned(w, f.version.Load(), f.table.Load())
 	})
 	f.srv = httptest.NewServer(mux)
 	t.Cleanup(f.srv.Close)
@@ -115,22 +123,22 @@ func writeVersioned(w http.ResponseWriter, version int64, config any) {
 	w.Write(raw)
 }
 
-func (f *fakeAPI) setAssignment(v map[string]string) {
+func (f *fakeAPI) setAssignment(v map[string]innerapi.AssignmentEntry) {
 	f.assignment.Store(v)
-	f.assignmentVersion.Add(1)
+	f.version.Add(1)
 }
 
 func (f *fakeAPI) setConfig(v map[string]json.RawMessage) {
 	f.config.Store(v)
-	f.configVersion.Add(1)
+	f.version.Add(1)
 }
 
 func (f *fakeAPI) setTable(v map[string]any) {
 	f.table.Store(v)
-	f.tableVersion.Add(1)
+	f.version.Add(1)
 }
 
-const pickerConfigV1 = `{
+const eppConfigV1 = `{
   "featureGates": ["flowControl"],
   "plugins": [
     {"name": "ep-discover", "type": "cluster-table-discovery", "parameters": {"clusterName": "cluster-a"}},
@@ -158,8 +166,9 @@ const pickerConfigV1 = `{
 }`
 
 // TestEndToEnd drives the full pipeline against a fake InnerAPI:
-// assignment creates the cell, picker_config compiles the engine, the
-// cluster table flows through the hub into the datastore.
+// the merged epp_data/config snapshot creates the cell (assignment), compiles
+// the engine (epp_config) and the cluster table flows through the hub into
+// the datastore.
 func TestEndToEnd(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
@@ -168,8 +177,10 @@ func TestEndToEnd(t *testing.T) {
 	registerTestPlugins(hub)
 
 	api := newFakeAPI(t)
-	api.setAssignment(map[string]string{"cluster-a": "primary"})
-	api.setConfig(map[string]json.RawMessage{"cluster-a": json.RawMessage(pickerConfigV1)})
+	api.setAssignment(map[string]innerapi.AssignmentEntry{
+		"cluster-a": {Primary: sp("epp-test-1")},
+	})
+	api.setConfig(map[string]json.RawMessage{"cluster-a": json.RawMessage(eppConfigV1)})
 	api.setTable(map[string]any{
 		"cluster-a": map[string]any{
 			"sub-1": []map[string]any{
@@ -191,14 +202,14 @@ func TestEndToEnd(t *testing.T) {
 		_, ok := manager.Get(cell.Key(cluster))
 		return ok
 	}, nil)
-	configPoller := poller.NewConfigPoller(client, manager)
-	watcher := poller.NewAssignmentWatcher(client, "epp-test-1", manager)
+	watcher := poller.NewEppDataWatcher(client, "epp-test-1", manager, logr.Discard())
 
-	// Round 1: assignment -> config -> discovery, in dependency order.
-	if _, _, view, err := watcher.Fetch(ctx, ""); err != nil {
-		t.Fatalf("assignment fetch: %v", err)
-	} else if err := watcher.Handle(ctx, view); err != nil {
-		t.Fatalf("assignment handle: %v", err)
+	// Round 1: the merged snapshot assigns the cluster and compiles its
+	// engine in one handle.
+	if _, _, cfg, err := watcher.Fetch(ctx, ""); err != nil {
+		t.Fatalf("epp_data fetch: %v", err)
+	} else if err := watcher.Handle(ctx, cfg); err != nil {
+		t.Fatalf("epp_data handle: %v", err)
 	}
 
 	c, ok := manager.Get("cluster-a")
@@ -209,10 +220,10 @@ func TestEndToEnd(t *testing.T) {
 		t.Fatalf("role=%v", c.Role())
 	}
 
-	if _, _, configs, err := configPoller.Fetch(ctx, ""); err != nil {
-		t.Fatalf("config fetch: %v", err)
-	} else if err := configPoller.Handle(ctx, configs); err != nil {
-		t.Fatalf("config handle: %v", err)
+	if _, _, cfg, err := watcher.Fetch(ctx, ""); err != nil {
+		t.Fatalf("epp_data fetch 2: %v", err)
+	} else if err := watcher.Handle(ctx, cfg); err != nil {
+		t.Fatalf("epp_data handle 2: %v", err)
 	}
 	if c.Engine() == nil {
 		t.Fatal("engine not compiled")
@@ -252,14 +263,14 @@ func TestEndToEnd(t *testing.T) {
 	}
 
 	// Round 2: config change hot-swaps the engine; version moves.
-	configV2 := strings.Replace(pickerConfigV1, `"defaultRequestTTL": "30s"`, `"defaultRequestTTL": "60s"`, 1)
+	configV2 := strings.Replace(eppConfigV1, `"defaultRequestTTL": "30s"`, `"defaultRequestTTL": "60s"`, 1)
 	api.setConfig(map[string]json.RawMessage{"cluster-a": json.RawMessage(configV2)})
-	if _, _, configs, err := configPoller.Fetch(ctx, "v1"); err != nil {
-		t.Fatalf("config fetch 2: %v", err)
+	if _, _, cfg, err := watcher.Fetch(ctx, "v1"); err != nil {
+		t.Fatalf("epp_data fetch 2: %v", err)
 	} else {
-		raw, ok := configs["cluster-a"]
+		raw, ok := cfg.EppConfig["cluster-a"]
 		if !ok {
-			t.Fatal("cluster-a missing from picker_config")
+			t.Fatal("cluster-a missing from epp_config")
 		}
 		swapped, err := manager.ApplyConfig(ctx, "cluster-a", raw)
 		if err != nil {
@@ -297,12 +308,16 @@ func TestEndToEnd(t *testing.T) {
 		time.Sleep(50 * time.Millisecond)
 	}
 
-	// Round 4: assignment revoked -> cell dropped.
-	api.setAssignment(map[string]string{})
-	if _, _, view, err := watcher.Fetch(ctx, "v1"); err != nil {
-		t.Fatalf("assignment fetch 2: %v", err)
-	} else if err := watcher.Handle(ctx, view); err != nil {
-		t.Fatalf("assignment handle 2: %v", err)
+	// Round 4: assignment revoked -> cell dropped; the retired report
+	// endpoint must have received nothing.
+	api.setAssignment(map[string]innerapi.AssignmentEntry{})
+	if _, _, cfg, err := watcher.Fetch(ctx, "v1"); err != nil {
+		t.Fatalf("epp_data fetch 3: %v", err)
+	} else if err := watcher.Handle(ctx, cfg); err != nil {
+		t.Fatalf("epp_data handle 3: %v", err)
+	}
+	if n := api.reportPosts.Load(); n != 0 {
+		t.Fatalf("readiness report posted %d times, want 0", n)
 	}
 	deadline = time.Now().Add(5 * time.Second)
 	for {

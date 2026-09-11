@@ -23,6 +23,9 @@ import (
 
 	"github.com/go-logr/logr"
 
+	"github.com/llm-d/llm-d-router/pkg/epp/config/loader"
+	"github.com/llm-d/llm-d-router/pkg/epp/flowcontrol"
+
 	fwkplugin "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/plugin"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/extractor/metrics"
 	sourcemetrics "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/source/metrics"
@@ -132,5 +135,30 @@ func TestCompileEmptyConfig(t *testing.T) {
 	// A second compile reuses the configured data plane (dataConfigured latch).
 	if _, err := Compile(context.Background(), "cell-compile-ok", raw, c, testDependencies()); err != nil {
 		t.Fatalf("second Compile() error = %v", err)
+	}
+}
+
+// TestLoadRawConfigFlowControlGate verifies the featureGates config field is
+// the switch that enables the flowControl gate (ai-gateway-api appends
+// ["flowControl"] when the cluster config carries a flow_control section):
+// present -> enabled, absent -> default (off).
+func TestLoadRawConfigFlowControlGate(t *testing.T) {
+	registerTestPlugins()
+	loader.RegisterFeatureGate(flowcontrol.FeatureGate, false)
+
+	_, gates, err := loader.LoadRawConfig([]byte(`{}`), logr.Discard())
+	if err != nil {
+		t.Fatalf("LoadRawConfig(empty): %v", err)
+	}
+	if gates[flowcontrol.FeatureGate] {
+		t.Error("flowControl gate enabled without featureGates entry")
+	}
+
+	_, gates, err = loader.LoadRawConfig([]byte(`{"featureGates":["flowControl"]}`), logr.Discard())
+	if err != nil {
+		t.Fatalf("LoadRawConfig(gated): %v", err)
+	}
+	if !gates[flowcontrol.FeatureGate] {
+		t.Error("flowControl gate not enabled by featureGates entry")
 	}
 }

@@ -41,7 +41,7 @@ import (
 	"github.com/rainway-ai-gateway/ai-gateway-epp/pkg/cell"
 )
 
-// healthServer gates readiness on assignment sync and cell readiness; the
+// healthServer gates readiness on the epp_data sync and cell readiness; the
 // liveness probe is always serving. Mirrors the upstream atomic-flag pattern.
 type healthServer struct {
 	healthpb.UnimplementedHealthServer
@@ -49,7 +49,7 @@ type healthServer struct {
 	manager *cell.Manager
 }
 
-// setReady flips readiness once the assignment watcher has synced and every
+// setReady flips readiness once the epp_data watcher has synced and every
 // assigned cell is ready.
 func (h *healthServer) setReady(v bool) { h.ready.Store(v) }
 

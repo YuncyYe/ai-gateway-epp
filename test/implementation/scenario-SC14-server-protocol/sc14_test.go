@@ -32,14 +32,15 @@ import (
 
 const chatBody = `{"model":"sim-model","messages":[{"role":"user","content":"hello from sc14"}],"max_tokens":8}`
 
-func installCluster(api *common.MockAPI, simAddr string) {
+func installCluster(api *common.MockAPI, instance, simAddr string) {
+	api.SetDefaultInstance(instance)
 	api.SetClusterTable(map[string]map[string][]map[string]any{
 		"cluster-a": {"sub-1": common.BackendMap(common.Backend{
 			Name: "cluster-a-a0", Addr: "127.0.0.1", Port: common.PortOf(simAddr), Weight: 50,
 		})},
 	})
 	api.SetAssignment(map[string]string{"cluster-a": "primary"})
-	api.SetConfigs(map[string]json.RawMessage{"cluster-a": common.PickerConfig("cluster-a", false)})
+	api.SetEppConfig(map[string]json.RawMessage{"cluster-a": common.EppConfig("cluster-a", false)})
 }
 
 func waitHealthTLS(t *testing.T, addr string, pool *x509.CertPool, timeout time.Duration) {
@@ -79,7 +80,7 @@ func TestTC01_HealthOnExtProcPort(t *testing.T) {
 
 	sim, simAddr := common.StartSim(t, logDir, "sim-a0", "sim-model")
 	defer sim.Stop(t)
-	installCluster(api, simAddr)
+	installCluster(api, "epp-sc14-tc01", simAddr)
 	api.SetFail(false)
 
 	epp.WaitHealth(t, "", 30*time.Second)
@@ -110,7 +111,7 @@ func TestTC02_GrpcTLS(t *testing.T) {
 	logDir := t.TempDir()
 	sim, simAddr := common.StartSim(t, logDir, "sim-a0", "sim-model")
 	defer sim.Stop(t)
-	installCluster(api, simAddr)
+	installCluster(api, "epp-sc14-tc02", simAddr)
 
 	epp := common.StartEPP(t, logDir, api.Addr(), "epp-sc14-tc02",
 		"-grpc-tls-cert", certFile, "-grpc-tls-key", keyFile)

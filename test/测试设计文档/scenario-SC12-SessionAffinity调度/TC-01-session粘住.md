@@ -16,8 +16,8 @@
 
 ## 前置条件
 
-1. mock API 已配置 assignment（cluster-a=primary）、cluster_table（cluster-a 下 sub-1 挂 2 个 sim 后端 a0/b0）。
-2. picker_config 下发的调度配置：`cluster-table-discovery`（clusterName=cluster-a）+ `session-affinity-scorer`（strategy=session_id，sessionIdConfig.sources=[{header: "x-session-id"}]）+ `max-score-picker`；调度 profile 引用 sa-scorer + max-score；dataLayer discovery 引用 ep-discover；requestHandler 使用 openai-parser。
+1. mock API 已配置 assignment 全量视图（cluster-a → 本实例 primary）、cluster_table（cluster-a 下 sub-1 挂 2 个 sim 后端 a0/b0）。
+2. epp_config 下发的调度配置：`cluster-table-discovery`（clusterName=cluster-a）+ `session-affinity-scorer`（strategy=session_id，sessionIdConfig.sources=[{header: "x-session-id"}]）+ `max-score-picker`；调度 profile 引用 sa-scorer + max-score；dataLayer discovery 引用 ep-discover；requestHandler 使用 openai-parser。
 3. epp 启动并就绪。
 
 ## 测试步骤

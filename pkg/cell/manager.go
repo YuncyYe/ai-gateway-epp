@@ -61,7 +61,7 @@ type Options struct {
 }
 
 // Manager owns the Cell registry and lifecycle transitions driven by the
-// assignment watcher and config poller.
+// epp_data watcher (roles) and its per-cell engine hot-swaps.
 type Manager struct {
 	opts    Options
 	logger  logr.Logger

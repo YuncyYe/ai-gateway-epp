@@ -97,7 +97,7 @@ func converged(t *testing.T, e *common.Env, body string, burst int) string {
 func TestTC01_AffinityConverges(t *testing.T) {
 	e := common.NewEnv(t, "epp-sc11-tc01", map[string][]string{
 		"cluster-a": {"a0", "b0"},
-	}, common.WithPickerConfigFn(prefixConfig))
+	}, common.WithEppConfigFn(prefixConfig))
 	defer e.Close(t)
 
 	body := chatBodyWith(longPrompt)
@@ -117,7 +117,7 @@ func TestTC01_AffinityConverges(t *testing.T) {
 func TestTC02_DistinctPromptsConvergeIndependently(t *testing.T) {
 	e := common.NewEnv(t, "epp-sc11-tc02", map[string][]string{
 		"cluster-a": {"a0", "b0"},
-	}, common.WithPickerConfigFn(prefixConfig))
+	}, common.WithEppConfigFn(prefixConfig))
 	defer e.Close(t)
 
 	bodyA := chatBodyWith(longPrompt)
@@ -138,7 +138,7 @@ func TestTC02_DistinctPromptsConvergeIndependently(t *testing.T) {
 func TestTC03_ReloadRelearns(t *testing.T) {
 	e := common.NewEnv(t, "epp-sc11-tc03", map[string][]string{
 		"cluster-a": {"a0", "b0"},
-	}, common.WithPickerConfigFn(prefixConfig))
+	}, common.WithEppConfigFn(prefixConfig))
 	defer e.Close(t)
 
 	body := chatBodyWith(longPrompt)
@@ -147,7 +147,7 @@ func TestTC03_ReloadRelearns(t *testing.T) {
 	// Hot-reload with a renamed (still valid) plugin: engine swaps, prefix
 	// index is rebuilt empty.
 	v1 := common.EngineVersion(common.FetchMetrics(t, e.EPP.MetricsAddr), "cluster-a")
-	e.API.SetConfigs(map[string]json.RawMessage{
+	e.API.SetEppConfig(map[string]json.RawMessage{
 		"cluster-a": json.RawMessage(strings.ReplaceAll(string(prefixConfig("cluster-a")), `"prefix-scorer"`, `"prefix-scorer-v2"`)),
 	})
 	common.WaitFor(t, 20*time.Second, "engine swapped after reload", func() bool {

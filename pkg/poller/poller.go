@@ -13,8 +13,8 @@
 //limitations under the License.
 
 // Package poller implements the generic version-increment polling framework
-// and the three concrete pollers (cluster discovery, config, assignment) that
-// pull state from ai-gateway-api into the local cells.
+// and the two concrete pollers (cluster discovery, epp_data) that pull state
+// from ai-gateway-api into the local cells.
 package poller
 
 import (

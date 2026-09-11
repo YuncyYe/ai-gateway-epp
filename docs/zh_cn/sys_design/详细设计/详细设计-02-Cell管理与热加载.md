@@ -75,7 +75,7 @@ func (m *Manager) SwapEngine(key Key, eng *Engine)             // 热加载切�
 
 - `CREATING` 期间到达的请求：返回可重试错误（BFE 短暂回退本地均衡）
 - `DRAINING` 有全局超时（`EngineDrainTimeout`，默认 60s），超时强杀并记指标
-- 状态变迁全部由 AssignmentWatcher 驱动 + ConfigPoller 补就绪条件
+- 状态变迁全部由 EppDataWatcher 驱动（assignment 段驱动角色/生命周期，epp_config 段补引擎就绪条件），两段同 version 快照内一起应用
 
 ### 3.2 Engine 状态（Cell 内）
 
@@ -113,7 +113,7 @@ compileEngine 内部（复用 llm-d loader，函数化自 `cmd/epp/runner` 的 p
 | 执行体 | 数量 | 所有权 |
 |---|---|---|
 | gRPC stream handler | 每请求 1 goroutine | 只读 engine 指针 + cell.ds（引擎内部 COW，无锁读） |
-| Poller goroutine | 3（discovery/config/assignment） | 各自 Source 串行；写路径只到 Manager API |
+| Poller goroutine | 2（discovery/epp_data） | 各自 Source 串行；写路径只到 Manager API |
 | drain goroutine | DrainScheduler 池（上限 N） | 独占旧 Engine，直到排空 |
 | 采集 goroutine | 每端点 1（llm-d collector 托管于 cell.ds 生命周期） | 随 Cell 数据面生灭 |
 

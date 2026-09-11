@@ -16,7 +16,7 @@
 
 ## 前置条件
 
-同 TC-01：picker_config 为 cluster-table-discovery + session-affinity-scorer（session_id，header `x-session-id`）+ max-score-picker；cluster-a 挂 2 个 sim 后端 a0/b0；epp 启动并就绪。
+同 TC-01：epp_config 为 cluster-table-discovery + session-affinity-scorer（session_id，header `x-session-id`）+ max-score-picker；cluster-a 挂 2 个 sim 后端 a0/b0；epp 启动并就绪。
 
 ## 测试步骤
 

@@ -17,7 +17,6 @@
 package sc03
 
 import (
-	"encoding/json"
 	"strings"
 	"testing"
 	"time"
@@ -27,44 +26,14 @@ import (
 
 const chatBody = `{"model":"sim-model","messages":[{"role":"user","content":"hello from sc03"}],"max_tokens":8}`
 
-// report is a decoded assignment report body (pkg/assignment/types.go).
-type report struct {
-	Instance string `json:"instance"`
-	Cells    []struct {
-		Key    string `json:"key"`
-		Role   string `json:"role"`
-		State  string `json:"state"`
-		Engine string `json:"engine_version"`
-	} `json:"cells"`
-}
-
-func lastReport(t *testing.T, e *common.Env) report {
+// assertNoReport fails the test if the retired readiness-report endpoint
+// received any POST: reporting was removed with the per-instance assignment
+// view (failover is driven by the gateway side).
+func assertNoReport(t *testing.T, e *common.Env) {
 	t.Helper()
-	reports := e.API.Reports()
-	if len(reports) == 0 {
-		t.Fatal("no assignment report received")
+	if n := e.API.ReportCount(); n != 0 {
+		t.Fatalf("readiness report posted %d times, want 0", n)
 	}
-	var r report
-	if err := json.Unmarshal(reports[len(reports)-1], &r); err != nil {
-		t.Fatalf("decode report: %v", err)
-	}
-	return r
-}
-
-func cellOf(r report, cluster string) (reportCell, bool) {
-	for _, c := range r.Cells {
-		if c.Key == cluster {
-			return c, true
-		}
-	}
-	return reportCell{}, false
-}
-
-type reportCell = struct {
-	Key    string `json:"key"`
-	Role   string `json:"role"`
-	State  string `json:"state"`
-	Engine string `json:"engine_version"`
 }
 
 // TestTC01_DemoteToStandby: demoting the cluster to standby makes ext-proc
@@ -82,10 +51,12 @@ func TestTC01_DemoteToStandby(t *testing.T) {
 		return err != nil && strings.Contains(err.Error(), "not serving")
 	})
 	e.EPP.WaitHealth(t, "liveness", 5*time.Second)
+	assertNoReport(t, e)
 }
 
-// TestTC02_PromoteToPrimary: promoting back to primary restores service and
-// the report reflects the primary role/state.
+// TestTC02_PromoteToPrimary: promoting back to primary restores service;
+// the standby cell was hot, so the flip needs no config round-trip. No
+// readiness report is posted at any point.
 func TestTC02_PromoteToPrimary(t *testing.T) {
 	e := common.NewEnv(t, "epp-sc03-tc02", map[string][]string{
 		"cluster-a": {"a0"},
@@ -104,15 +75,11 @@ func TestTC02_PromoteToPrimary(t *testing.T) {
 		ep, err := common.PickEndpoint(e.EPP.GRPCAddr, "cluster-a", "/v1/chat/completions", []byte(chatBody), 3*time.Second)
 		return err == nil && ep == e.ClusterSims["cluster-a"][0]
 	})
-
-	common.WaitFor(t, 20*time.Second, "report shows primary", func() bool {
-		c, ok := cellOf(lastReport(t, e), "cluster-a")
-		return ok && c.Role == "primary" && c.State == "primary"
-	})
+	assertNoReport(t, e)
 }
 
 // TestTC03_Revoke: removing the cluster from the assignment drops the cell;
-// requests fail and the report no longer carries the cluster.
+// requests fail and the surviving cluster is unaffected.
 func TestTC03_Revoke(t *testing.T) {
 	e := common.NewEnv(t, "epp-sc03-tc03", map[string][]string{
 		"cluster-a": {"a0"},
@@ -131,9 +98,5 @@ func TestTC03_Revoke(t *testing.T) {
 	if err != nil || ep != e.ClusterSims["cluster-b"][0] {
 		t.Fatalf("cluster-b pick = %q, %v", ep, err)
 	}
-
-	common.WaitFor(t, 20*time.Second, "report drops revoked cluster", func() bool {
-		_, ok := cellOf(lastReport(t, e), "cluster-a")
-		return !ok
-	})
+	assertNoReport(t, e)
 }

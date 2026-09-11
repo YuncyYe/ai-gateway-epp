@@ -45,6 +45,28 @@ type Versioned[T any] struct {
 	Config  T      `json:"Config"`
 }
 
+// EppDataConfigPath is the InnerAPI endpoint for the merged epp_data
+// snapshot: compiled per-cluster configs and the full assignment view in
+// one versioned payload.
+const EppDataConfigPath = "/configs/epp_data/config"
+
+// EppDataConfig is the two-section epp_data snapshot: EppConfig maps a
+// cluster to the api-compiled EndpointPickerConfig, Assignment maps a
+// cluster to its instance group (full view, identical for every instance).
+type EppDataConfig struct {
+	EppConfig  map[string]json.RawMessage `json:"epp_config"`
+	Assignment map[string]AssignmentEntry `json:"assignment"`
+}
+
+// AssignmentEntry is one cluster's instance group in the full assignment
+// view. Primary/Standby hold instance ids; a null Primary is abnormal (the
+// cluster matches no instance as primary), a null Standby is a
+// single-instance group.
+type AssignmentEntry struct {
+	Primary *string `json:"primary"`
+	Standby *string `json:"standby"`
+}
+
 // Client is a thin HTTP client for the InnerAPI. It is safe for concurrent
 // use; a single instance is shared by all pollers.
 type Client struct {
@@ -122,31 +144,6 @@ func (c *Client) Get(ctx context.Context, path, version string, out any) (change
 		}
 	}
 	return true, payload.Version, nil
-}
-
-// Post sends a JSON body to path; used for the readiness report.
-func (c *Client) Post(ctx context.Context, path string, body any) error {
-	raw, err := json.Marshal(body)
-	if err != nil {
-		return err
-	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+path, bytes.NewReader(raw))
-	if err != nil {
-		return err
-	}
-	c.setAuth(req)
-	req.Header.Set("Content-Type", "application/json")
-
-	resp, err := c.hc.Do(req)
-	if err != nil {
-		return fmt.Errorf("innerapi post %s: %w", path, err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode/100 != 2 {
-		b, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		return fmt.Errorf("innerapi post %s: status %d: %s", path, resp.StatusCode, truncate(string(b), 200))
-	}
-	return nil
 }
 
 func (c *Client) setAuth(req *http.Request) {

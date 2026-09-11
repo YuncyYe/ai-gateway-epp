@@ -122,9 +122,11 @@ func checkHealthWithCreds(addr, service string, creds credentials.TransportCrede
 	return resp.Status, nil
 }
 
-// PickerConfig returns a minimal working picker config for a cluster. The
-// cluster-table-discovery plugin is pinned to the given cluster name.
-func PickerConfig(cluster string, flowControl bool) json.RawMessage {
+// EppConfig returns a minimal working epp_config (compiled
+// EndpointPickerConfig) for a cluster. The cluster-table-discovery plugin is
+// pinned to the given cluster name. flowControl adds the flowControl feature
+// gate (pair the config with a flowControl section to activate flow control).
+func EppConfig(cluster string, flowControl bool) json.RawMessage {
 	fc := ""
 	if flowControl {
 		fc = `

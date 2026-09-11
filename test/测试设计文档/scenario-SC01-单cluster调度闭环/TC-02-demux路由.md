@@ -18,8 +18,8 @@
 
 1. harness 已构建 epp 二进制；inference-sim 二进制可用。
 2. mock API 已配置：
-   - assignment：`cluster-a`、`cluster-b` 均为 `primary`（instance 匹配 epp 的 `-instance-id`）；
-   - picker_config：`cluster-a`、`cluster-b` 各一份最小可用配置；
+   - assignment 全量视图：`cluster-a`、`cluster-b` 的 primary 均为本实例（epp 以 `-instance-id` 自匹配）；
+   - epp_config：`cluster-a`、`cluster-b` 各一份最小可用配置；
    - cluster_table：`cluster-a.sub-1 = [a0(Weight=50)]`，`cluster-b.sub-1 = [b0(Weight=50)]`，Addr/Port 为 sim 实例动态地址。
 3. epp 启动并就绪（health=SERVING）。
 

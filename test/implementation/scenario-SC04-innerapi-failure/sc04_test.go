@@ -60,8 +60,8 @@ func TestTC02_RecoverySyncsPendingConfig(t *testing.T) {
 	}
 
 	e.API.SetFail(true)
-	e.API.SetConfigs(map[string]json.RawMessage{
-		"cluster-a": json.RawMessage(strings.ReplaceAll(string(common.PickerConfig("cluster-a", false)), `"max-score"`, `"max-score-v2"`)),
+	e.API.SetEppConfig(map[string]json.RawMessage{
+		"cluster-a": json.RawMessage(strings.ReplaceAll(string(common.EppConfig("cluster-a", false)), `"max-score"`, `"max-score-v2"`)),
 	})
 	// Still serving with the old engine while the API is down.
 	if got := common.EngineVersion(common.FetchMetrics(t, e.EPP.MetricsAddr), "cluster-a"); got != v1 {

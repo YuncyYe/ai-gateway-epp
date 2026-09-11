@@ -53,7 +53,7 @@ cluster_table 的 `Weight` 字段在 EPP 链路上**只生效为注册/摘除开
 
 | 编号 | 需求 | 优先级 |
 |---|---|---|
-| FR-C1 | 从 ai-gateway-api InnerAPI（新增 picker_config 接口，形状为 `map[cluster]EndpointPickerConfig`）拉取各 cluster 的 EPP 配置，version 增量同步 | P0 |
+| FR-C1 | 从 ai-gateway-api InnerAPI `epp_data/config` 接口的 `epp_config` 段（`map[cluster]EndpointPickerConfig`，api 已从简化用户形态确定性编译）拉取各 cluster 的 EPP 配置，version 增量同步 | P0 |
 | FR-C2 | 每个 cluster 的配置独立编译为独立调度引擎（Engine）：插件链、调度 profile、流控参数完全按 cluster 隔离，互不相同 | P0 |
 | FR-C3 | cluster 配置变更后：编译 → 校验 → 原子切换，新请求立即使用新引擎；旧引擎排空（队列出空 + 在飞请求完结，超时强制）后销毁 | P0 |
 | FR-C4 | 配置编译失败：该 cluster 沿用旧引擎继续服务，其他 cluster 不受影响；失败以指标和日志暴露 | P0 |
@@ -66,14 +66,14 @@ cluster_table 的 `Weight` 字段在 EPP 链路上**只生效为注册/摘除开
 |---|---|---|
 | FR-M1 | 单进程内按 cluster 隔离运行单元（Cell）：每 cluster 独立的数据面（端点集合+指标采集）与政策面（引擎），共享 gRPC server | P0 |
 | FR-M2 | 请求 demux：从 ext-proc 消息 metadata 读取 pool 名（BFE 注入，约定 namespace/key），路由到对应 Cell；未知 pool 返回可重试错误 | P0 |
-| FR-M3 | cluster 生命周期数据驱动：随 cluster_table/picker_config 数据自动创建、就绪、drain、销毁 Cell | P0 |
+| FR-M3 | cluster 生命周期数据驱动：随 cluster_table 与 `epp_data/config`（assignment 段）数据自动创建、就绪、drain、销毁 Cell | P0 |
 | FR-M4 | 请求路径指标携带 cluster/pool 维度标签 | P1 |
 
 ### 3.4 主备池化（FR-H）
 
 | 编号 | 需求 | 优先级 |
 |---|---|---|
-| FR-H1 | ai-gateway-api 为每 cluster 分配所属实例组与组内主实例，随 InnerAPI 下发；EPP 按分配只为指定 cluster 建 Cell（主=服务态，备=热数据冷准入）。**第一期采用固定 2 实例互备组**（见 §3.4.1） | P0 |
+| FR-H1 | ai-gateway-api 为每 cluster 分配所属实例组与组内主实例，经 `epp_data/config` 的 assignment 段（`map[cluster]{primary, standby}` 全量视图，所有实例返回相同内容）下发；EPP 以本实例 id 在视图中自匹配角色，只为指定 cluster 建 Cell（主=服务态，备=热数据冷准入）。**第一期采用固定 2 实例互备组**（见 §3.4.1） | P0 |
 | FR-H2 | BFE 对指定 cluster 优先请求主 EPP，失败后故障转移到同组另一实例（若配置了备）；要求 BFE failover 带滞回（冷却期 + 连续健康检查通过才回切），防抖动 | P0 |
 | FR-H3 | 主备切换不丢"已派发"请求语义：failover 重试只针对未派发请求（派发标记机制），容忍在飞请求计量丢失（TTL 自愈） | P1 |
 | FR-H4 | 脑裂（主备同时活跃）可接受不防御：按共享背压有界退化处理，但必须有"同一 cluster 双活跃"告警指标 | P1 |
@@ -81,7 +81,7 @@ cluster_table 的 `Weight` 字段在 EPP 链路上**只生效为注册/摘除开
 
 #### 主备模型与实例组（已对齐）
 
-**第一期：固定 2 实例互备组**。基本单元是"实例组"= 两个 EPP 实例（如 A、B）互为备份：cluster 分配到组后，组内再分为"A 主"和"B 主"两个子集（A 是这些 cluster 的主、B 是备；反之亦然）。分配数据结构为 `cluster → {group, primary}`，备由组内另一实例隐式得出：
+**第一期：固定 2 实例互备组**。基本单元是"实例组"= 两个 EPP 实例（如 A、B）互为备份：cluster 分配到组后，组内再分为"A 主"和"B 主"两个子集（A 是这些 cluster 的主、B 是备；反之亦然）。分配数据结构为 `cluster → {group, primary}`，备由组内另一实例隐式得出；下发形态为 assignment 全量视图 `map[cluster]{primary, standby}`（同组副本收到的内容完全相同），EPP 侧以本实例 id 逐 cluster 自匹配角色：
 
 ```
 组 g1 = {epp-A, epp-B}
@@ -95,6 +95,8 @@ cluster_table 的 `Weight` 字段在 EPP 链路上**只生效为注册/摘除开
 
 **组内约束**：同一 cluster 的主备必须是组内两个不同实例（2 实例组天然满足）；跨机架/可用区反亲和为 P2 增强。
 
+**实例身份约定（自匹配的前提）**：EPP 以 StatefulSet 部署，实例 id = **Pod hostname**（启动参数 `-instance-id` 的缺省值，同组副本共享完全相同的启动参数，零 per-instance 配置）；实例池由 ai-gateway-api OpenAPI `/epp-pool` 静态登记（id 取 pod 名）。非 K8s 部署显式传 `-instance-id`；id 与 `/epp-pool` 不一致的实例自匹配落空、无 cell 不服务，须以告警暴露。
+
 **角色转换与扩缩容（NFR-5 的配套语义）**：分配变化经 InnerAPI 拉取生效，已有实例不重启。Cell 按角色转换矩阵处理：
 
 | 旧角色 \ 新角色 | 主 | 备 | 无分配 |
@@ -102,7 +104,7 @@ cluster_table 的 `Weight` 字段在 EPP 链路上**只生效为注册/摘除开
 | 主 | 不变 | 停止准入（drain），保留数据 | drain 后销毁 |
 | 备 | 开闸即服务 | 不变 | 销毁 |
 
-**再平衡顺序约束**：ai-gateway-api 将 cluster 主角色 flipped 给新实例前，须确认该实例对应 Cell 已完成首同步（EPP 上报 per-cell 就绪态，或先翻"备"观察健康再翻"主"），避免 BFE 切换到未就绪实例。
+**再平衡顺序**：EPP **无上报义务**（无 register/心跳/就绪上报）——主备 failover 由 BFE 侧 EPPAddr 连接滞回驱动（FR-H2），ai-gateway-api 不"等就绪再翻转"。分配器只需保证新实例先以"备"角色进入并完成数据同步（standby 热数据冷准入，FR-H5），再翻转主角色即可。
 
 ### 3.5 与 BFE 的协议配合（FR-B，BFE 侧需求，本项目协调落地）
 
@@ -120,7 +122,7 @@ cluster_table 的 `Weight` 字段在 EPP 链路上**只生效为注册/摘除开
 | FR-O1 | 每 cluster 独立暴露：引擎版本/重载结果（`engine_reloads_total{cluster,result}`、`engine_current_version{cluster}`） | P0 |
 | FR-O2 | 拉取组件健康：最近同步时间、失败计数、退避状态（discovery 与 config 各一份） | P0 |
 | FR-O3 | 复用 llm-d 既有指标体系（调度/流控/端点指标），不改引擎内部埋点；指标统一由 metrics 端口（`--metrics-port`，默认 9090）的 `/metrics` 暴露 | P0 |
-| FR-O4 | 双活跃告警数据源：Cell 按角色上报活跃态 | P1 |
+| FR-O4 | 双活跃告警数据源：Cell 按角色暴露活跃态指标（`cell_state{cluster, role, state}`） | P1 |
 | FR-O5 | 健康检查走 gRPC health 协议（`grpc.health.v1`），作为 BFE failover 判活与就绪门控的唯一健康信号源（与 FR-B2 滞回判断对接）：独立健康端口（`--health-port`）与 ext-proc 主端口（`--grpc-port`）同时挂载 health 服务，BFE 探测数据地址即可拿到判活结果；gRPC 服务端 TLS 可配（`--grpc-tls-cert`/`--grpc-tls-key`，两者同配生效，缺省明文） | P0 |
 | FR-O6 | pprof（`/debug/pprof/*`，引擎默认开启）提供显式开关；生产部署默认关闭，排障时开启 | P1 |
 
@@ -151,7 +153,7 @@ cluster_table 的 `Weight` 字段在 EPP 链路上**只生效为注册/摘除开
 | 项 | 内容 |
 |---|---|
 | 引擎依赖 | `github.com/llm-d/llm-d-router`（Apache 2.0），pin 版本，禁 import 其 cmd/ 包；插件注册列表在新仓库组合根重建 |
-| 数据源契约 | ai-gateway-api InnerAPI：`cluster_table`（已有）+ picker_config + 主备分配（后两者为新增，格式遵循 InnerAPI 统一信封约定：`ErrNum/ErrMsg/Data{Version, Config}`，`Data: null` 表示无变化，`Authorization: Token` 鉴权） |
+| 数据源契约 | ai-gateway-api InnerAPI：`cluster_table`（已有）+ `epp_data/config`（新增，单端点含 `epp_config` 与 `assignment` 两段、同一 version 快照；契约见《EPP配置定义说明-epp_config.md》）。格式遵循 InnerAPI 统一信封约定：`ErrNum/ErrMsg/Data{Version, Config}`，`Data: null` 表示无变化，`Authorization: Token` 鉴权 |
 | 网关契约 | BFE fork（本工作区 `bfe/`）的 ext-proc 客户端与 BalanceEpp；协议 metadata 约定 `llm-d.ai/inference-pool` |
 | 启动前提 | spike 验证通过：新仓库仅用导出 API 可完成最小装配（datastore + discovery + scheduler + ext-proc server） |
 | 团队约定 | 设计文档（本仓库 `docs/zh_cn/sys_design/`）为设计基线；改动目标需同步修订对应设计文档 |
@@ -161,7 +163,7 @@ cluster_table 的 `Weight` 字段在 EPP 链路上**只生效为注册/摘除开
 | 里程碑 | 内容 | 验收（对齐 G1-G6） |
 |---|---|---|
 | M0：spike | 新仓库最小装配跑通一个请求 | G6 成立；可行性确认（1-2 天） |
-| M1：单 cluster 闭环 | discovery + config poller + 单 Cell 引擎 + BFE metadata demux 全链路 | G1、G2、G4（单 cluster 子集）、G6 |
+| M1：单 cluster 闭环 | discovery + epp_data/config 轮询 + 单 Cell 引擎 + BFE metadata demux 全链路 | G1、G2、G4（单 cluster 子集）、G6 |
 | M2：热加载 | per-cell 引擎编译切换 + drain + 失败隔离 | G3、G5（主备子集：切换不丢已派发语义） |
 | M3：多 cluster + 实例组主备 | Cell 生命周期 + 组分配与组内主实例下发 + BFE 按序 failover（第一期 2 实例互备组） | G4、G5 完整 |
 | M4：生产加固 | P1 项（参数热通道、双活跃告警、备 Cell 热备、BFE 客户端生产化）+ NFR 全量压测 | NFR-1 ~ NFR-7 |
@@ -173,7 +175,7 @@ cluster_table 的 `Weight` 字段在 EPP 链路上**只生效为注册/摘除开
 | 改造 vs 重写 | 保留引擎（~85% 库引用），重写组合根（~15%） | 《ai-gateway-epp系统设计.md》 |
 | 代码库形态 | 新仓库 + go module 引用，非拷贝 | 《ai-gateway-epp系统设计.md》 |
 | 发现源 | InnerAPI cluster_table 轮询，fail-static | 《详细设计-03-Poller与InnerAPI对接.md》 |
-| 配置通道 | InnerAPI picker_config + per-cell 编译切换 | 《详细设计-02-Cell管理与热加载.md》 |
+| 配置通道 | InnerAPI `epp_data/config`（epp_config + assignment 两段）+ per-cell 编译切换 | 《详细设计-02-Cell管理与热加载.md》 |
 | demux | BFE ext-proc metadata 注入 pool 名 | 《详细设计-04-Demux与请求路径.md》 |
 | 部署形态 | 实例池 + 每 cluster 主备；脑裂接受、滞回必须 | 《ai-gateway-epp系统设计.md》 |
 | 扩展模型 | Cell 架构（单 EPP 多 cluster） | 《ai-gateway-epp系统设计.md》 |

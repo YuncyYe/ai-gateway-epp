@@ -18,7 +18,7 @@
 
 1. harness 已构建 epp 二进制；inference-sim 二进制可用。
 2. `common.WriteSelfSignedCert` 生成 ECDSA 自签证书（CN=ai-gateway-epp-test，SAN=127.0.0.1），写 cert/key PEM 到临时目录，并返回客户端校验用 `*x509.CertPool`。
-3. mock API 已下发三视图：cluster_table（cluster-a / sub-1，后端 `cluster-a-a0` = sim 地址，Weight=50）、assignment（cluster-a=primary）、picker_config（`PickerConfig("cluster-a", false)`）。
+3. mock API 已下发两端点：cluster_table（cluster-a / sub-1，后端 `cluster-a-a0` = sim 地址，Weight=50）、assignment 全量视图（cluster-a → 本实例 primary）、epp_config（`EppConfig("cluster-a", false)`）。
 
 ## 测试步骤
 
