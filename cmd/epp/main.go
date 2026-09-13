@@ -22,6 +22,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"runtime"
 	"syscall"
 	"time"
 
@@ -43,6 +44,9 @@ import (
 	"github.com/rainway-ai-gateway/ai-gateway-epp/pkg/poller"
 )
 
+var version string
+var commit string
+
 func main() {
 	if err := run(); err != nil {
 		stdlog.Fatal(err)
@@ -51,6 +55,17 @@ func main() {
 
 func run() error {
 	cfg := parseConfig()
+
+	if *showVersion {
+		fmt.Printf("epp version: %s\n", version)
+		return nil
+	}
+	if *showVerbose {
+		fmt.Printf("epp version: %s\n", version)
+		fmt.Printf("go version: %s\n", runtime.Version())
+		fmt.Printf("git commit: %s\n", commit)
+		return nil
+	}
 
 	stdl := stdlog.New(os.Stderr, "", stdlog.LstdFlags)
 	logger := stdr.New(stdl).WithName("ai-gateway-epp")
@@ -149,6 +164,7 @@ func run() error {
 	})
 
 	logger.Info("epp started",
+		"version", version,
 		"instance", cfg.InstanceID,
 		"grpcPort", cfg.GRPCPort,
 		"healthPort", cfg.HealthPort,

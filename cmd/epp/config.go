@@ -23,6 +23,11 @@ import (
 	"time"
 )
 
+var (
+	showVersion = flag.Bool("v", false, "to show version of epp")
+	showVerbose = flag.Bool("V", false, "to show verbose information about epp")
+)
+
 // Config is the process-level configuration; everything cluster-level comes
 // from ai-gateway-api at runtime.
 type Config struct {
