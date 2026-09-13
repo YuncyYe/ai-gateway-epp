@@ -21,9 +21,11 @@ test/integration/   fake InnerAPI 端到端测试
 ## 构建与测试
 
 ```
-go build ./...
+make build    # 注入 VERSION 文件中的版本号与 git commit 后构建 ./cmd/epp
 go test ./...
 ```
+
+也可以 `go build ./...`，但直接构建出的二进制不含版本信息；`epp -v` 查看版本，`epp -V` 额外查看 go 版本与 git commit。
 
 go.mod 通过 `replace` 指向本地 llm-d-router 工作区；需要 go1.26+。
 
