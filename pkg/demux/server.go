@@ -62,12 +62,15 @@ func (s *Server) Process(stream extProcPb.ExternalProcessor_ProcessServer) (retE
 
 	pool := extractPool(first)
 	if pool == "" {
+		s.logger.V(2).Info("no pool metadata, using default", "defaultPool", s.defaultPool)
 		pool = s.defaultPool
 		if pool == "" {
 			demuxErrors.WithLabelValues("no-pool").Inc()
 			return toStatus(ErrNoPoolMetadata)
 		}
 	}
+
+	s.logger.V(2).Info("routing request", "pool", pool)
 
 	c, err := s.router.Route(pool)
 	if err != nil {
@@ -80,6 +83,8 @@ func (s *Server) Process(stream extProcPb.ExternalProcessor_ProcessServer) (retE
 		demuxErrors.WithLabelValues("cell-draining").Inc()
 		return toStatus(ErrCellDraining)
 	}
+	s.logger.V(2).Info("cell routed", "pool", pool, "role", c.Role().String(), "engineVersion", eng.Version)
+
 	done, ok := c.Track(eng)
 	if !ok {
 		// Engine swapped between load and track; the client may retry.

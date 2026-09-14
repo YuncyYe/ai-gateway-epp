@@ -38,8 +38,8 @@ type BackendConf struct {
 	Weight int    `json:"Weight"`
 }
 
-// clusterTableConfig is Config[cluster][subCluster][]BackendConf.
-type clusterTableConfig map[string]map[string][]BackendConf
+// ClusterTableConfig is Config[cluster][subCluster][]BackendConf.
+type ClusterTableConfig map[string]map[string][]BackendConf
 
 // ClusterDiscovery polls the cluster table and pushes the desired endpoint
 // set per cluster into the clustertable hub; the discovery plugins inside
@@ -65,37 +65,13 @@ func NewClusterDiscovery(client *innerapi.Client, hub *clustertable.Hub, assigne
 
 // Fetch implements Source.
 func (d *ClusterDiscovery) Fetch(ctx context.Context, version string) (bool, string, map[string][]fwkdl.EndpointMetadata, error) {
-	var table clusterTableConfig
+	var table ClusterTableConfig
 	changed, ver, err := d.client.Get(ctx, ClusterTablePath, version, &table)
 	if err != nil || !changed {
 		return changed, ver, nil, err
 	}
 
-	desired := make(map[string][]fwkdl.EndpointMetadata, len(table))
-	for cluster, subClusters := range table {
-		eps := []fwkdl.EndpointMetadata{}
-		for _, backends := range subClusters {
-			for _, b := range backends {
-				if b.Weight == 0 {
-					// Weight 0 means the instance is drained; absence from the
-					// desired set drives the delete in the plugin diff.
-					continue
-				}
-				eps = append(eps, fwkdl.EndpointMetadata{
-					ID: k8stypes.NamespacedName{
-						Namespace: cluster,
-						Name:      backendID(b),
-					},
-					Name:        b.Name,
-					Address:     unwrapIPv6(b.Addr),
-					Port:        strconv.Itoa(b.Port),
-					MetricsHost: net.JoinHostPort(unwrapIPv6(b.Addr), strconv.Itoa(b.Port)),
-				})
-			}
-		}
-		desired[cluster] = eps
-	}
-	return true, ver, desired, nil
+	return true, ver, ConvertClusterTableToEndpoints(table), nil
 }
 
 // Handle implements Handle: replace the hub content with the fetched table so
@@ -117,6 +93,35 @@ func (d *ClusterDiscovery) Handle(ctx context.Context, desired map[string][]fwkd
 	}
 	d.hub.ReplaceAll(filtered)
 	return nil
+}
+
+// ConvertClusterTableToEndpoints converts the cluster table config (raw
+// backend entries from InnerAPI or local file) into the endpoint metadata
+// map consumed by Handle and the clustertable hub.
+func ConvertClusterTableToEndpoints(table ClusterTableConfig) map[string][]fwkdl.EndpointMetadata {
+	desired := make(map[string][]fwkdl.EndpointMetadata, len(table))
+	for cluster, subClusters := range table {
+		eps := []fwkdl.EndpointMetadata{}
+		for _, backends := range subClusters {
+			for _, b := range backends {
+				if b.Weight == 0 {
+					continue
+				}
+				eps = append(eps, fwkdl.EndpointMetadata{
+					ID: k8stypes.NamespacedName{
+						Namespace: cluster,
+						Name:      backendID(b),
+					},
+					Name:        b.Name,
+					Address:     unwrapIPv6(b.Addr),
+					Port:        strconv.Itoa(b.Port),
+					MetricsHost: net.JoinHostPort(unwrapIPv6(b.Addr), strconv.Itoa(b.Port)),
+				})
+			}
+		}
+		desired[cluster] = eps
+	}
+	return desired
 }
 
 func backendID(b BackendConf) string {

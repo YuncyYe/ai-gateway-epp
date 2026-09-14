@@ -78,14 +78,15 @@ func (w *EppDataWatcher) Fetch(ctx context.Context, version string) (bool, strin
 func (w *EppDataWatcher) Handle(ctx context.Context, cfg innerapi.EppDataConfig) error {
 	log := w.logger.WithValues("instance", w.instance)
 
-	// Resolve the local role view from the full assignment view.
 	mine := make(map[string]cell.Role, len(cfg.Assignment))
 	for cluster, entry := range cfg.Assignment {
 		role, ok := resolveRole(w.instance, entry)
 		if !ok {
+			log.V(2).Info("cluster not assigned to this instance", "cluster", cluster)
 			continue
 		}
 		mine[cluster] = role
+		log.V(2).Info("role resolved", "cluster", cluster, "role", role.String())
 		if peer := peerID(w.instance, entry); peer != "" {
 			log.Info("assignment peer", "cell", cluster, "role", role.String(), "peer", peer)
 		}
@@ -97,8 +98,6 @@ func (w *EppDataWatcher) Handle(ctx context.Context, cfg innerapi.EppDataConfig)
 		assignmentNoMatch.Set(0)
 	}
 
-	// Role diff: ensure desired cells (Ensure covers create, promote and
-	// demote), drop cells that lost their assignment.
 	for cluster, role := range mine {
 		if _, err := w.manager.Ensure(ctx, cell.Key(cluster), role); err != nil {
 			return fmt.Errorf("ensure cell %s: %w", cluster, err)
@@ -106,18 +105,18 @@ func (w *EppDataWatcher) Handle(ctx context.Context, cfg innerapi.EppDataConfig)
 	}
 	for _, c := range w.manager.List() {
 		if _, ok := mine[string(c.Key)]; !ok {
+			log.V(2).Info("dropping cell (no longer assigned)", "cell", string(c.Key))
 			w.manager.Drop(c.Key)
 		}
 	}
 
-	// Apply the epp_config section to the clusters this instance holds;
-	// entries for clusters without a local role are skipped. A compile
-	// failure is isolated to that cluster (the old engine keeps serving).
 	for cluster, raw := range cfg.EppConfig {
 		if _, ok := mine[cluster]; !ok {
 			continue
 		}
+		log.V(2).Info("applying config to cell", "cell", cluster)
 		if _, err := w.manager.ApplyConfig(ctx, cell.Key(cluster), raw); err != nil {
+			log.V(2).Info("config apply failed (keeping old engine)", "cell", cluster, "error", err.Error())
 			continue
 		}
 	}

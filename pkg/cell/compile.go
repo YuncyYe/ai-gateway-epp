@@ -69,6 +69,7 @@ type Dependencies struct {
 func Compile(cellCtx context.Context, key Key, raw json.RawMessage, c *Cell, deps Dependencies) (*Engine, error) {
 	logger := deps.Logger.WithValues("cell", string(key))
 
+	logger.V(2).Info("loading raw config")
 	rawConfig, featureGates, err := loader.LoadRawConfig(raw, logger)
 	if err != nil {
 		return nil, fmt.Errorf("decode config: %w", err)
@@ -83,6 +84,7 @@ func Compile(cellCtx context.Context, key Key, raw json.RawMessage, c *Cell, dep
 		return nil, err
 	}
 
+	logger.V(2).Info("instantiating plugins")
 	handle := fwkplugin.NewEppHandle(engCtx, makePodListFunc(c.ds), fwkplugin.WithMetricsRecorder(deps.MetricsRecorder))
 	cfg, err := loader.InstantiateAndConfigure(rawConfig, handle, logger)
 	if err != nil {
@@ -120,10 +122,13 @@ func Compile(cellCtx context.Context, key Key, raw json.RawMessage, c *Cell, dep
 	// is resident by design. Later config generations reuse it; data-layer
 	// changes take effect on cell recreation.
 	if !c.dataConfigured.Load() {
+		logger.V(2).Info("configuring datalayer runtime (first config)")
 		if err := c.rt.Configure(cfg.DataConfig, logger); err != nil {
 			return fail(fmt.Errorf("configure datalayer runtime: %w", err))
 		}
 		c.dataConfigured.Store(true)
+	} else {
+		logger.V(2).Info("datalayer runtime already configured, reusing")
 	}
 
 	scheduler := scheduling.NewSchedulerWithConfig(cfg.SchedulerConfig)
@@ -133,6 +138,7 @@ func Compile(cellCtx context.Context, key Key, raw json.RawMessage, c *Cell, dep
 	var fc *fccontroller.FlowController
 	var admission requestcontrol.AdmissionController
 	if featureGates[flowcontrol.FeatureGate] && cfg.FlowControlConfig != nil {
+		logger.V(2).Info("flow control enabled")
 		candidates = requestcontrol.NewCachedEndpointCandidates(engCtx, candidates, 50*time.Millisecond)
 		registry := fcregistry.NewFlowRegistry(cfg.FlowControlConfig.Registry, logger)
 		fc = fccontroller.NewFlowController(engCtx, string(key), cfg.FlowControlConfig.Controller, fccontroller.Deps{
@@ -172,6 +178,7 @@ func Compile(cellCtx context.Context, key Key, raw json.RawMessage, c *Cell, dep
 		eng.discovery = append(eng.discovery, disc)
 	}
 
+	logger.V(2).Info("engine compilation completed", "version", eng.Version, "fcEnabled", fc != nil)
 	return eng, nil
 }
 

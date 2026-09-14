@@ -28,11 +28,13 @@ import (
 
 	extProcPb "github.com/envoyproxy/go-control-plane/envoy/service/ext_proc/v3"
 	"github.com/go-logr/stdr"
+	fwkdl "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/datalayer"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"golang.org/x/sync/errgroup"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
 	healthpb "google.golang.org/grpc/health/grpc_health_v1"
+	ctrlLog "sigs.k8s.io/controller-runtime/pkg/log"
 	ctrlmetrics "sigs.k8s.io/controller-runtime/pkg/metrics"
 
 	stdlog "log"
@@ -67,9 +69,15 @@ func run() error {
 		return nil
 	}
 
-	stdl := stdlog.New(os.Stderr, "", stdlog.LstdFlags)
+	//stdlf := stdlog.LstdFlags | stdlog.Lshortfile
+	stdlf := stdlog.LstdFlags | stdlog.Llongfile
+	stdl := stdlog.New(os.Stderr, "", stdlf)
 	logger := stdr.New(stdl).WithName("ai-gateway-epp")
-	stdr.SetVerbosity(1)
+	stdr.SetVerbosity(cfg.logVerbosity())
+
+	// Bridge the EPP logger into controller-runtime's deferred logging so that
+	// llm-d-router (handlers/server.go, flowcontrol, etc.) logs are visible.
+	ctrlLog.SetLogger(logger)
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
@@ -78,7 +86,6 @@ func run() error {
 	hub := clustertable.NewHub()
 	registerPlugins(hub)
 
-	client := innerapi.NewClient(cfg.APIAddr, cfg.APIToken, cfg.PollTimeout)
 	manager := cell.NewManager(ctx, cell.Options{
 		Logger:                   logger,
 		MetricsRecorder:          ctrlmetrics.Registry,
@@ -88,14 +95,40 @@ func run() error {
 		AllowExperimentalPlugins: cfg.AllowExperimentalPlugins,
 	})
 
-	discoverySource := poller.NewClusterDiscovery(client, hub, func(cluster string) bool {
-		_, ok := manager.Get(cell.Key(cluster))
-		return ok
-	}, nil)
-	eppDataWatcher := poller.NewEppDataWatcher(client, cfg.InstanceID, manager, logger)
+	var discoverySrc poller.Source[map[string][]fwkdl.EndpointMetadata]
+	var eppDataSrc poller.Source[innerapi.EppDataConfig]
+	var discoveryHandle poller.Handle[map[string][]fwkdl.EndpointMetadata]
+	var eppDataHandle poller.Handle[innerapi.EppDataConfig]
 
-	discoveryLoop := poller.New("discovery", discoverySource, discoverySource.Handle, poller.Options{Interval: cfg.PollInterval, Timeout: cfg.PollTimeout, Logger: logger})
-	eppDataLoop := poller.New("epp_data", eppDataWatcher, eppDataWatcher.Handle, poller.Options{Interval: cfg.PollInterval, Timeout: cfg.PollTimeout, Logger: logger})
+	if cfg.LocalConfigDir != "" {
+		discoverySrc = poller.NewLocalClusterTableSource(cfg.LocalConfigDir, "cluster_table.json")
+		eppDataSrc = poller.NewLocalFileSource[innerapi.EppDataConfig](cfg.LocalConfigDir, "epp_data_config.json")
+
+		discovery := poller.NewClusterDiscovery(nil, hub, func(cluster string) bool {
+			_, ok := manager.Get(cell.Key(cluster))
+			return ok
+		}, nil)
+		eppData := poller.NewEppDataWatcher(nil, cfg.InstanceID, manager, logger)
+
+		discoveryHandle = discovery.Handle
+		eppDataHandle = eppData.Handle
+	} else {
+		client := innerapi.NewClient(cfg.APIAddr, cfg.APIToken, cfg.PollTimeout)
+
+		discovery := poller.NewClusterDiscovery(client, hub, func(cluster string) bool {
+			_, ok := manager.Get(cell.Key(cluster))
+			return ok
+		}, nil)
+		eppData := poller.NewEppDataWatcher(client, cfg.InstanceID, manager, logger)
+
+		discoverySrc = discovery
+		eppDataSrc = eppData
+		discoveryHandle = discovery.Handle
+		eppDataHandle = eppData.Handle
+	}
+
+	discoveryLoop := poller.New("discovery", discoverySrc, discoveryHandle, poller.Options{Interval: cfg.PollInterval, Timeout: cfg.PollTimeout, Logger: logger})
+	eppDataLoop := poller.New("epp_data", eppDataSrc, eppDataHandle, poller.Options{Interval: cfg.PollInterval, Timeout: cfg.PollTimeout, Logger: logger})
 
 	health := &healthServer{manager: manager}
 

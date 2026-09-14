@@ -29,7 +29,7 @@ var (
 )
 
 // Config is the process-level configuration; everything cluster-level comes
-// from ai-gateway-api at runtime.
+// from ai-gateway-api at runtime, unless LocalConfigDir is set (local debug).
 type Config struct {
 	InstanceID   string
 	APIAddr      string
@@ -55,6 +55,30 @@ type Config struct {
 
 	RefreshMetricsInterval   time.Duration
 	AllowExperimentalPlugins bool
+
+	// LocalConfigDir, when non-empty, loads cluster-level configs
+	// (cluster_table.json, epp_data_config.json) from this directory
+	// instead of InnerAPI.
+	LocalConfigDir string
+
+	// LogLevel controls log verbosity.
+	//  info  = 0  (only ai-gateway-epp V(0))
+	//  debug = 2  (includes llm-d-router DEFAULT)
+	//  trace = 5  (includes llm-d-router TRACE)
+	LogLevel string
+}
+
+func (c Config) logVerbosity() int {
+	switch c.LogLevel {
+	case "trace":
+		return 5
+	case "debug":
+		return 2
+	case "info":
+		return 0
+	default:
+		return 2
+	}
 }
 
 func parseConfig() Config {
@@ -76,6 +100,8 @@ func parseConfig() Config {
 	flag.StringVar(&cfg.PoolNamespace, "pool-namespace", getenv("NAMESPACE", "ai-gateway"), "endpoint pool namespace label for metrics")
 	flag.DurationVar(&cfg.RefreshMetricsInterval, "refresh-metrics-interval", 50*time.Millisecond, "datalayer metrics polling interval")
 	flag.BoolVar(&cfg.AllowExperimentalPlugins, "allow-experimental-plugins", false, "allow Alpha-stability plugins")
+	flag.StringVar(&cfg.LocalConfigDir, "local-config-dir", os.Getenv("AI_GATEWAY_EPP_LOCAL_CONFIG_DIR"), "load cluster-level configs from local directory instead of InnerAPI (empty = use InnerAPI)")
+	flag.StringVar(&cfg.LogLevel, "log-level", getenv("AI_GATEWAY_EPP_LOG_LEVEL", "info"), "log verbosity: info (default), debug, trace")
 	flag.Parse()
 
 	if cfg.InstanceID == "" {
