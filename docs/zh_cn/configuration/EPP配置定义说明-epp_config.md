@@ -102,7 +102,7 @@ GET /configs/epp_data/config?version=<上次版本号>
 | `utilization-filter` | `{ "conditions": [ { "metric": "<active-requests\|running-requests\|waiting-queue\|kv-cache-utilization>", "maxValue": 0.9 } ], "fallbackOnEmpty": true }`（maxValue 取用户侧 `kv_cache_utilization_max`） |
 | `kv-cache-utilization-scorer` / `queue-scorer` | `{}`（无参数；weight 在 schedulingProfiles 中给出） |
 | `prefix-cache-scorer` | `{}`（无参数；用户侧 `prefix_cache_affinity=true`（默认）时注入，固定 weight 1.0） |
-| `session-affinity-scorer` | `{ "sessionIdConfig": { "sources": [ { "header": "x-session-id" } ] } }`（用户侧 `session_affinity.header` 编译而来；固定 weight 1.0） |
+| `session-affinity-scorer` | `{ "strategy": "session_id", "sessionIdConfig": { "sources": [ { "header": "x-session-id" } ] } }`（用户侧 `session_affinity.header` 编译而来；`strategy` 必须显式固定 `session_id`，缺省时插件默认 `encoded_endpoint_header` 会忽略 `sessionIdConfig`；固定 weight 1.0） |
 | `max-score-picker` | `{}` |
 | `utilization-detector` | `{}` |
 | `openai-parser` | `{}` |
