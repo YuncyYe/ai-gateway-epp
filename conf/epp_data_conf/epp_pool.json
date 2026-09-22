@@ -1,0 +1,15 @@
+{
+  "name": "EPP.pool",
+  "groups": [
+    {
+      "name": "epp-local",
+      "instances": [
+        {
+          "id": "epp-id1",
+          "host": "127.0.0.1",
+          "port": 9002
+        }
+      ]
+    }
+  ]
+}

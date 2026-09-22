@@ -61,6 +61,7 @@ func (e *Engine) FC() *controller.FlowController { return e.fc }
 // start launches this generation's discovery plugins and marks the cell ready
 // once the initial endpoint sync has landed.
 func (e *Engine) start(c *Cell, logger logr.Logger) {
+	logger.V(2).Info("engine starting", "cell", string(c.Key), "version", e.Version, "discoveries", len(e.discovery))
 	if len(e.discovery) == 0 {
 		c.markReady()
 		return

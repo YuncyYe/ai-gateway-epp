@@ -175,11 +175,14 @@ func (m *Manager) Ensure(ctx context.Context, key Key, role Role) (*Cell, error)
 		// no-op
 	case role == RolePrimary:
 		m.Promote(key)
+		m.logger.V(2).Info("role transition", "cell", string(key), "role", "primary")
 	case role == RoleStandby:
 		if c.Role() == RoleNone {
 			c.setRole(RoleStandby)
+			m.logger.V(2).Info("role transition", "cell", string(key), "role", "standby")
 		} else {
 			m.Demote(key)
+			m.logger.V(2).Info("role transition", "cell", string(key), "role", "standby(demoted)")
 		}
 	}
 	return c, nil
@@ -218,6 +221,7 @@ func (m *Manager) Drop(key Key) {
 	if !ok {
 		return
 	}
+	m.logger.V(2).Info("dropping cell", "cell", string(key))
 	c.setState(StateDraining)
 	if eng := c.Engine(); eng != nil {
 		m.scheduleDrain(c, eng, true)
@@ -238,9 +242,11 @@ func (m *Manager) ApplyConfig(ctx context.Context, key Key, raw json.RawMessage)
 
 	hash := HashConfig(raw)
 	if v := c.currentHash.Load(); v != nil && v.(string) == hash {
+		m.logger.V(2).Info("config unchanged, skipping compile", "cell", string(key), "hash", hash)
 		return false, nil
 	}
 
+	m.logger.V(2).Info("compiling engine", "cell", string(key), "hash", hash)
 	eng, err := m.compile(c.ctx, key, raw, c)
 	if err != nil {
 		engineReloads.WithLabelValues(string(key), "invalid").Inc()

@@ -102,6 +102,7 @@ func (p *Poller[T]) Version() string { return p.version }
 // loop (fail-static: consumers keep the last known good state).
 func (p *Poller[T]) Start(ctx context.Context) error {
 	log := p.opts.Logger.WithValues("poller", p.name)
+	log.V(2).Info("poller starting", "interval", p.opts.Interval)
 	interval := p.opts.Interval
 	if interval <= 0 {
 		interval = 5 * time.Second
@@ -125,16 +126,19 @@ func (p *Poller[T]) Start(ctx context.Context) error {
 			backoffState.WithLabelValues(p.name).Set(1)
 			continue
 		}
+		log.V(2).Info("fetch completed", "changed", changed, "version", ver)
 		p.backoff.reset()
 		backoffState.WithLabelValues(p.name).Set(0)
 
 		if changed {
+			log.V(2).Info("applying changes")
 			if err := p.handle(ctx, data); err != nil {
 				// Do not advance the version: re-fetch the same round next tick.
 				p.fail(log, err)
 				delay = interval
 				continue
 			}
+			log.V(2).Info("changes applied", "version", ver)
 			p.version = ver
 		}
 		lastSyncTimestamp.WithLabelValues(p.name).Set(float64(time.Now().Unix()))

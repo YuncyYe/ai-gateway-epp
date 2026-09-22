@@ -53,13 +53,29 @@ EPP 实例池由 ai-gateway-api OpenAPI `/epp-pool` 静态配置（实例组 + �
 
 关键边界：**数据面（datastore/采集）常驻于 Cell，政策面（Engine）经原子指针热切换**——这是热加载不丢端点状态的根本原因。
 
+本地调试/测试可用 `--local-config-dir` 以本地文件源替代上述两条 InnerAPI 拉取链路（§3.7），进程内部结构不变。
+
 ## 3. 模块设计
 
 ### 3.1 组合根（cmd/epp）
 
-- 只做三件事：进程级配置解析（apiAddr/token/实例身份/端口）→ 拉起 Poller 与 CellManager → 启动 gRPC/metrics/health server
+- 只做三件事：进程级配置解析（apiAddr/token/实例身份/端口/本地配置目录/日志级别）→ 拉起 Poller 与 CellManager → 启动 gRPC/metrics/health server
 - **不含**调度/流控装配逻辑（那是 Cell 内的事）；参照 `llm-d-router/cmd/epp/runner.go:1055-1202` 的装配顺序，按 Cell 化重组
 - 插件注册列表在此重建（参照 `runner.go:725-729`），只注册无 K8s 依赖的内置插件 + 自研 `cluster-table-discovery`
+- `run()` 按 `cfg.LocalConfigDir` 二选一组装数据源：为空走 InnerAPI（`innerapi.NewClient` + 两个 InnerAPI 源），非空走本地文件源（§3.7）；下游 Cell/Engine 链路复用不变
+
+进程级参数（`cmd/epp/config.go`）：
+
+| 参数 | 环境变量 | 说明 |
+|---|---|---|
+| `--api-addr` / `--api-token` | `AI_GATEWAY_API_ADDR` / `AI_GATEWAY_API_TOKEN` | InnerAPI 地址与 Token（本地文件模式下不使用） |
+| `--instance-id` | `AI_GATEWAY_EPP_INSTANCE_ID` | 实例身份，缺省 hostname；用于 assignment 自匹配 |
+| `--poll-interval` / `--poll-timeout` | — | 轮询间隔（默认 5s）与单次拉取超时（默认 3s） |
+| `--local-config-dir` | `AI_GATEWAY_EPP_LOCAL_CONFIG_DIR` | 本地配置目录，非空即本地文件模式（§3.7） |
+| `--log-level` | `AI_GATEWAY_EPP_LOG_LEVEL` | 日志级别 `info`/`debug`/`trace`，映射 verbosity 0/2/5 |
+| `--grpc-port` / `--health-port` / `--metrics-port` / `--bind-address` / `--enable-pprof` | — | 服务端口与可观测开关 |
+| `--grpc-tls-cert` / `--grpc-tls-key` | `AI_GATEWAY_EPP_TLS_CERT` / `AI_GATEWAY_EPP_TLS_KEY` | ext-proc/health gRPC 双向 TLS（成对设置） |
+| `--default-pool` / `--pool-namespace` / `--engine-drain-timeout` / `--refresh-metrics-interval` / `--allow-experimental-plugins` | `NAMESPACE` | 兜底 pool、指标命名空间、drain 超时等 |
 
 ### 3.2 Cell 管理器（pkg/cell）
 
@@ -87,12 +103,14 @@ type Cell struct {
 
 ### 3.4 Poller 框架（pkg/innerapi + pkg/poller）
 
-两个轮询器共享一个 client（鉴权 Token、version 增量、`Data: null` 处理、指数退避、失败指标）：
+两个轮询器共享一个 `innerapi.Client`（鉴权 Token、version 增量、`Data: null` 处理、指数退避、失败指标）：
 
 | Poller | 数据源 | 消费动作 |
 |---|---|---|
 | ClusterDiscovery | cluster_table | 解析全量 `Config[cluster]`，per-cluster diff（增/改/删实例），按 cluster 名分发到各 Cell 的 datastore（EndpointDiscovery notifier 语义：单 goroutine 顺序 Upsert/Delete） |
 | EppDataWatcher | epp_data/config | 单 topic 单 version 快照含两段：**epp_config 段**（`map[cluster]EndpointPickerConfig`，api 已从简化用户形态编译）取本实例有角色的 cluster 做 per-cell 编译（复用 loader 严格解码/DAG 实例化/层序校验）→ 校验通过原子切换，失败该 cell 保留旧引擎；**assignment 段**（全量视图 `map[cluster]{primary, standby}`，所有实例相同）以本实例 id 逐 cluster 自匹配角色 → 驱动 Cell 创建/角色转换/销毁 |
+
+数据源抽象：`Source[T]` 接口（`Fetch(ctx, version) → (changed, newVersion, data, err)`）将"取数"与"消费"解耦，`ClusterDiscovery`/`EppDataWatcher` 自身既是 `Source` 又提供 `Handle`。本地文件模式下（§3.7）仅替换 `Source`，两个 `Handle` 与轮询框架、下游 Cell/Engine 链路完全复用。
 
 一致性规则：Cell 就绪需**双段齐备**（assignment 有本实例角色 + epp_config/discovery 数据到达）；只有 epp_config 无 assignment 条目 → 跳过 + 告警（需求 §6 风险 5）。EPP **无上报义务**（无 register/心跳/就绪上报）：failover 由 BFE 侧 EPPAddr 连接滞回驱动，实例池由 OpenAPI `/epp-pool` 静态配置。
 
@@ -113,6 +131,20 @@ EppDataWatcher 发现 epp_config 变化
 ```
 
 第二期加参数热通道（FR-C6）：结构不变时直接写活插件的原子参数，不重建引擎。
+
+### 3.7 本地配置文件模式（`--local-config-dir`）
+
+用于**本地调试、集成测试与 CI**：无需部署 ai-gateway-api 控制面，EPP 仅依赖本地 JSON 文件即可启动（设计变更见 `docs/zh_cn/modifications/2026-09-14-local-config-file/`）。
+
+- **开关**：`--local-config-dir=<dir>`（环境变量 `AI_GATEWAY_EPP_LOCAL_CONFIG_DIR`）；非空即启用，此时 **不创建 `innerapi.Client`、不连接 InnerAPI**；为空（默认）行为与 §3.4 完全不变。
+- **实现机制**：利用 `Source[T]` 扩展点，`cmd/epp/main.go` 组装阶段以本地文件源替换 InnerAPI 源——
+  - `poller.NewLocalClusterTableSource(dir, "cluster_table.json")`：读 `ClusterTableConfig` 原始格式，经 `ConvertClusterTableToEndpoints` 转为 `map[cluster][]EndpointMetadata`（`Weight=0` 摘除）；
+  - `poller.NewLocalFileSource[innerapi.EppDataConfig](dir, "epp_data_config.json")`：通用 JSON 文件源。
+  - `ClusterDiscovery`/`EppDataWatcher` 仍以 `nil` client 创建，仅提供 `Handle`；轮询框架与下游链路零改动。
+- **文件格式**：直接对应 InnerAPI 响应的 `Data.Config` 层（**跳过 envelope**），即 `epp_data_config.json` = `{epp_config, assignment}`、`cluster_table.json` = `map[cluster]map[sub][]BackendConf`；目录下第三份 `epp_pool.json`（实例池定义）EPP **不消费**，仅调试参考，其 `id` 应与 assignment 中实例 id 一致。完整清单与示例见《EPP配置定义说明-epp_config.md》§1.2。
+- **生效语义**：本地文件无 version，每次轮询（`--poll-interval`，默认 5s）重读并返回 `changed=true`，故修改文件在下一轮生效（无需重启）；**无 inotify 文件监听、无 HTTP reload 入口**；读/解析失败 → fail-static（退避重试、沿用上一份成功配置）。
+- **日志**：`--log-level`（`AI_GATEWAY_EPP_LOG_LEVEL`）控制 verbosity——`info`=0（仅 EPP V(0)）、`debug`=2（含 llm-d-router DEFAULT）、`trace`=5（含 TRACE），便于本地排查。
+- **非目标**：不改变 InnerAPI 模式任何行为；文件监听/HTTP reload 未纳入本期；生产仍以 InnerAPI 热加载为准。
 
 ## 4. 关键时序
 
@@ -154,6 +186,8 @@ ai-gateway-api（可选第二期主动检测）→ assignment 翻转 → A 恢�
 | epp_data/config（新增） | EPP | 两段：`epp_config` = `map[cluster]EndpointPickerConfig`（api 编译后形态）；`assignment` = `map[cluster]{primary, standby}` 全量视图 | 《EPP配置定义说明-epp_config.md》（`docs/zh_cn/configuration/`） |
 
 EPP 实例池（实例组 + 实例列表）由 OpenAPI `/epp-pool` 静态配置，不属于拉取接口。变更全部走 version 增量 + Data-null；EPP 侧 fail-static。
+
+以上两个拉取接口均有**本地文件等价物**：`--local-config-dir` 模式下由 `cluster_table.json`、`epp_data_config.json` 提供同样的 `Config` 结构（跳过 envelope），EPP 不连接 InnerAPI（§3.7）。该模式仅用于调试/测试/CI，不构成新的生产配置来源。
 
 ## 6. 错误处理与边界
 
@@ -203,4 +237,5 @@ EPP 实例池（实例组 + 实例列表）由 OpenAPI `/epp-pool` 静态配置�
 | 《EPP配置定义说明-epp_config.md》（`../configuration/`） | epp_data/config 接口契约（epp_config 编译后形态 + assignment 全量视图） |
 | 《详细设计/README.md》（`详细设计/`） | 实现层展开：包结构 / Cell 热加载 / Poller / Demux / 可观测与测试 |
 | `docs/zh_cn/modifications/2026-09-08-epp-scheduling-integration/` | EPP 调度对接改造记录（单端点合并、全量视图自匹配、删除就绪上报等决策由来） |
+| `docs/zh_cn/modifications/2026-09-14-local-config-file/` | 本地配置文件加载改造记录（`--local-config-dir`、`LocalFileSource`、三份 JSON 文件格式） |
 | 上游 `github.com/llm-d/llm-d-router` 源码 | 引擎内部机制（调度/流控/数据层/插件/协议）；本仓库经 go module 引用 |

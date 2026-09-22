@@ -1,0 +1,74 @@
+{
+  "epp_config": {
+    "cluster_epp_sim": {
+      "plugins": [
+        {
+          "name": "ep-discover",
+          "type": "cluster-table-discovery",
+          "parameters": {
+            "clusterName": "cluster_epp_sim"
+          }
+        },
+        {
+          "name": "queue-scorer",
+          "type": "queue-scorer",
+          "parameters": {}
+        },
+        {
+          "name": "prefix-scorer",
+          "type": "prefix-cache-scorer",
+          "parameters": {}
+        },
+        {
+          "name": "max-score",
+          "type": "max-score-picker",
+          "parameters": {}
+        },
+        {
+          "name": "openai-parser",
+          "type": "openai-parser",
+          "parameters": {}
+        }
+      ],
+      "schedulingProfiles": [
+        {
+          "name": "default",
+          "plugins": [
+            {
+              "pluginRef": "queue-scorer",
+              "weight": 0.6
+            },
+            {
+              "pluginRef": "prefix-scorer",
+              "weight": 1
+            },
+            {
+              "pluginRef": "max-score",
+              "weight": null
+            }
+          ]
+        }
+      ],
+      "dataLayer": {
+        "discovery": {
+          "endpoints": {
+            "pluginRef": "ep-discover"
+          }
+        }
+      },
+      "requestHandler": {
+        "parsers": [
+          {
+            "pluginRef": "openai-parser"
+          }
+        ]
+      }
+    }
+  },
+  "assignment": {
+    "cluster_epp_sim": {
+      "primary": "epp-id1",
+      "standby": null
+    }
+  }
+}

@@ -7,7 +7,13 @@
 
 **配置来源**：OpenAPI 用户侧（`/clusters` 的 `epp_config` 字段）是**简化用户形态**（调度档位 + 少量一等公民参数），由 ai-gateway-api 在导出时**确定性编译**为本文定义的 `EndpointPickerConfig`（出厂即合法）。用户侧字段定义与编译规则见 ai-gateway-api 侧改造文档 `api-changes.md` §3.2.1（`ai-gateway-api/design-docs/modifications/2026-09-08-epp-scheduling-integration/`），本文不重复。本文是 EPP 消费的**编译后形态**权威定义。
 
-## 1. InnerAPI 承载格式
+**配置获取方式**有两种（见 §1）：默认经 InnerAPI `epp_data/config` 拉取（生产形态）；本地调试/集成测试可用 `--local-config-dir` 直接从本地 JSON 文件加载，二者产出的 `Config` 结构完全一致。
+
+## 1. 配置承载与来源
+
+EPP 的集群级配置（`cluster_table` 与本文 `epp_data/config`）有两条承载链路，由进程级参数 `--local-config-dir` 二选一：非空走**本地文件模式**（§1.2），为空走**InnerAPI 模式**（§1.1，默认）。
+
+### 1.1 InnerAPI 承载格式（默认）
 
 接口约定遵循 `cluster-table.md` 同款规范（version 增量、`Data: null` 表示无变化、Token 鉴权）：
 
@@ -41,6 +47,64 @@ GET /configs/epp_data/config?version=<上次版本号>
 - `assignment` 为全量视图：EPP 以自身实例 id（`-instance-id`，缺省 hostname；StatefulSet 部署约定见 ai-gateway-api 侧 `api-changes.md` §3.1）逐 cluster 匹配——`primary == 本实例 id` → Primary；`standby == 本实例 id` → Standby；均未命中 → 跳过该 cluster。
 - 异常态：`epp_config` 中存在但 `assignment` 中无条目的 cluster = 未分配（api 侧 server_data_conf 导出已拒绝该状态）；EPP 侧本地告警、不为该 cluster 建 cell。
 - 配置未变化时 `Data: null`；EPP 拉取失败时 fail-static，沿用旧配置。
+
+### 1.2 本地文件模式（`--local-config-dir`）
+
+用于本地调试、单元/集成测试与 CI：无需部署 ai-gateway-api 控制面，EPP 仅依赖本地文件即可启动。
+
+**开关**：命令行 `--local-config-dir=<dir>`，或环境变量 `AI_GATEWAY_EPP_LOCAL_CONFIG_DIR`（flag 缺省取该环境变量）。非空即进入本地文件模式，此时 EPP **不创建 InnerAPI 客户端、不连接 InnerAPI**；为空（默认）则完全走 §1.1，行为不变。
+
+**目录文件清单**：
+
+| 文件名 | 对应 InnerAPI 端点 | 内容 | EPP 是否消费 |
+|---|---|---|---|
+| `cluster_table.json` | `GET /configs/gslb_data/cluster_table` | `map[cluster]map[subCluster][]BackendConf`（RS 列表） | **是**（`ClusterDiscovery`） |
+| `epp_data_config.json` | `GET /configs/epp_data/config` | `{ "epp_config": ..., "assignment": ... }`（本文 §3-§9 + assignment） | **是**（`EppDataWatcher`） |
+| `epp_pool.json` | `GET /open-api/v1/epp-pool` | EPP 实例池定义（实例组 + 实例列表） | 否（仅参考/自检；EPP 经 `assignment` 段间接引用实例 id） |
+
+**文件格式**：直接对应 InnerAPI 响应中 **`Data.Config` 层**，**跳过外部 envelope**（即不含 `ErrNum/ErrMsg/Data/Version/WorkMode`）。因此：
+
+- `epp_data_config.json` 就是 §1.1 示例中 `Config` 对象的字面量：
+  ```json
+  {
+    "epp_config": { "cluster-a": { /* EndpointPickerConfig，见 §3 */ } },
+    "assignment": { "cluster-a": { "primary": "epp-0", "standby": "epp-1" } }
+  }
+  ```
+- `cluster_table.json`（对应 `ClusterTableConfig`，即 `map[cluster]map[subCluster][]BackendConf`；`Weight=0` 视为摘除）：
+  ```json
+  {
+    "cluster_epp_sim": {
+      "cluster_epp_sim": [
+        { "Name": "127.0.0.1_8981", "Addr": "127.0.0.1", "Port": 8981, "Weight": 50 },
+        { "Name": "127.0.0.1_8982", "Addr": "127.0.0.1", "Port": 8982, "Weight": 50 }
+      ]
+    }
+  }
+  ```
+- `epp_pool.json`（不消费，仅调试参考；`id` 应与 `assignment` 中的实例 id 一致）：
+  ```json
+  {
+    "name": "EPP.pool",
+    "groups": [
+      { "name": "epp-local", "instances": [ { "id": "epp-id1", "host": "127.0.0.1", "port": 9002 } ] }
+    ]
+  }
+  ```
+
+**版本与生效语义**：
+
+- 本地文件无 server-side version：每次轮询（`--poll-interval`，默认 5s）重新读取文件，`Fetch` 恒返回 `changed=true`、`newVersion` 为空。因此**修改文件后在下一个轮询周期内自动生效**（无需重启），但**无 inotify 文件监听、无 HTTP reload 入口**。
+- 读取失败或 JSON 解析失败 → 返回 error，继承 poller fail-static 语义：**不更新状态、指数退避重试、沿用上一份成功配置**。
+- 下游链路与 InnerAPI 模式完全一致：`epp_config` 仍按 §2 做 per-cell 编译-切换，`assignment` 仍以 `-instance-id` 自匹配角色。`epp_pool.json` 不参与运行时校验。
+
+**相关进程级参数**：
+
+| 参数 | 环境变量 | 默认 | 说明 |
+|---|---|---|---|
+| `--local-config-dir` | `AI_GATEWAY_EPP_LOCAL_CONFIG_DIR` | 空 | 本地配置目录；非空即启用本地文件模式 |
+| `--poll-interval` | — | `5s` | 轮询（含本地文件重读）间隔 |
+| `--log-level` | `AI_GATEWAY_EPP_LOG_LEVEL` | `info` | 日志级别：`info`（仅 EPP V(0)）/ `debug`（含 llm-d-router DEFAULT）/ `trace`（含 llm-d-router TRACE） |
 
 ## 2. 配置的角色与生效方式
 
