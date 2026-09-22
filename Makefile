@@ -14,7 +14,7 @@ all: build
 # 构建本地二进制（当前平台）
 build:
 	$(GOBUILD) -ldflags "-X main.version=v$(EPP_VERSION) -X main.commit=$(GIT_COMMIT)" \
-		-o epp ./cmd/epp
+		-o ./bin/epp ./cmd/epp
 
 test:
 	$(GOTEST) ./...

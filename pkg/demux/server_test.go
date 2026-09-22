@@ -29,12 +29,15 @@ import (
 	configPb "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
 	extProcPb "github.com/envoyproxy/go-control-plane/envoy/service/ext_proc/v3"
 	"github.com/go-logr/logr"
+	"github.com/google/uuid"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/types/known/structpb"
 	ctrlLog "sigs.k8s.io/controller-runtime/pkg/log"
 
+	llmdenvoy "github.com/llm-d/llm-d-router/pkg/common/envoy"
+	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	"github.com/llm-d/llm-d-router/pkg/epp/handlers"
 
 	"github.com/rainway-ai-gateway/ai-gateway-epp/pkg/cell"
@@ -217,6 +220,156 @@ func TestBufferedStreamReplay(t *testing.T) {
 	// The buffered first message must not have been consumed from the inner stream.
 	if len(inner.msgs) != 0 {
 		t.Fatalf("inner stream holds %d messages, want 0", len(inner.msgs))
+	}
+}
+
+// requestIDValues returns every x-request-id header value present on the
+// request (case-insensitive), in order.
+func requestIDValues(req *extProcPb.ProcessingRequest) []string {
+	h := req.GetRequestHeaders()
+	if h == nil || h.Headers == nil {
+		return nil
+	}
+	var vals []string
+	for _, kv := range h.Headers.Headers {
+		if strings.EqualFold(kv.Key, reqcommon.RequestIDHeaderKey) {
+			vals = append(vals, llmdenvoy.GetHeaderValue(kv))
+		}
+	}
+	return vals
+}
+
+type testCtxKey struct{}
+
+func TestBufferedStreamContext(t *testing.T) {
+	inner := newFakeStream()
+	injected := context.WithValue(context.Background(), testCtxKey{}, "injected")
+	bs := &bufferedStream{ExternalProcessor_ProcessServer: inner, ctx: injected}
+	if bs.Context() != injected {
+		t.Fatal("Context() should return the injected context")
+	}
+
+	// Without an injected context it must defer to the wrapped stream.
+	bs.ctx = nil
+	if bs.Context() != inner.ctx {
+		t.Fatal("Context() should fall back to the inner stream context")
+	}
+}
+
+// TestProcessRequestIDPreserved ensures a gateway-supplied x-request-id is
+// forwarded unchanged, so demux and the llm-d engine log the same value.
+func TestProcessRequestIDPreserved(t *testing.T) {
+	streamer := handlers.NewStreamingServer(nil, nil, nil, 0)
+	m := newTestManager(t, compileWithStreamer(streamer))
+	setupPool(t, m, "pool-a", cell.RolePrimary, `{"a":1}`)
+	s := NewServer(ManagerRouter{Manager: m}, "pool-a", logr.Discard())
+
+	first := headersRequest("pool-a")
+	first.GetRequestHeaders().Headers.Headers = append(first.GetRequestHeaders().Headers.Headers,
+		&configPb.HeaderValue{Key: reqcommon.RequestIDHeaderKey, Value: "rid-123"})
+
+	if err := s.Process(newFakeStream(first)); err != nil {
+		t.Fatalf("err=%v", err)
+	}
+	if got := requestIDValues(first); !reflect.DeepEqual(got, []string{"rid-123"}) {
+		t.Fatalf("x-request-id = %v, want exactly [rid-123]", got)
+	}
+}
+
+// TestProcessRequestIDGeneratedWhenMissing ensures a request without an
+// x-request-id gets one generated and written back into the headers, so the
+// engine below reads back the same value instead of generating its own.
+func TestProcessRequestIDGeneratedWhenMissing(t *testing.T) {
+	streamer := handlers.NewStreamingServer(nil, nil, nil, 0)
+	m := newTestManager(t, compileWithStreamer(streamer))
+	setupPool(t, m, "pool-a", cell.RolePrimary, `{"a":1}`)
+	s := NewServer(ManagerRouter{Manager: m}, "pool-a", logr.Discard())
+
+	first := headersRequest("pool-a")
+	if err := s.Process(newFakeStream(first)); err != nil {
+		t.Fatalf("err=%v", err)
+	}
+	got := requestIDValues(first)
+	if len(got) != 1 {
+		t.Fatalf("x-request-id values = %v, want exactly one", got)
+	}
+	if _, err := uuid.Parse(got[0]); err != nil {
+		t.Fatalf("generated x-request-id %q is not a UUID: %v", got[0], err)
+	}
+}
+
+// recorder collects log lines emitted through a recordingSink.
+type recorder struct {
+	mu      sync.Mutex
+	entries []string
+}
+
+func (r *recorder) add(msg string, kv []any) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.entries = append(r.entries, fmt.Sprint(append([]any{msg}, kv...)...))
+}
+
+// recordingSink is a minimal logr.LogSink that records messages plus their
+// accumulated WithValues, so tests can assert which fields a line carries.
+type recordingSink struct {
+	rec *recorder
+	kv  []any
+}
+
+func (s *recordingSink) Init(logr.RuntimeInfo)        {}
+func (s *recordingSink) Enabled(int) bool             { return true }
+func (s *recordingSink) WithName(string) logr.LogSink { return s }
+
+func (s *recordingSink) WithValues(kv ...any) logr.LogSink {
+	return &recordingSink{rec: s.rec, kv: append(append([]any{}, s.kv...), kv...)}
+}
+
+func (s *recordingSink) Info(_ int, msg string, kv ...any) {
+	s.rec.add(msg, append(append([]any{}, s.kv...), kv...))
+}
+
+func (s *recordingSink) Error(_ error, msg string, kv ...any) {
+	s.rec.add(msg, append(append([]any{}, s.kv...), kv...))
+}
+
+// TestProcessRequestIDInLogs verifies the whole feature: a request id is
+// attached to both the demux routing logs and the llm-d engine's "EPP received
+// request" line, which is the correlation the change is meant to provide.
+func TestProcessRequestIDInLogs(t *testing.T) {
+	rec := &recorder{}
+	logger := logr.New(&recordingSink{rec: rec})
+
+	streamer := handlers.NewStreamingServer(nil, nil, nil, 0)
+	m := newTestManager(t, compileWithStreamer(streamer))
+	setupPool(t, m, "pool-a", cell.RolePrimary, `{"a":1}`)
+	s := NewServer(ManagerRouter{Manager: m}, "pool-a", logger)
+
+	first := headersRequest("pool-a")
+	first.GetRequestHeaders().Headers.Headers = append(first.GetRequestHeaders().Headers.Headers,
+		&configPb.HeaderValue{Key: reqcommon.RequestIDHeaderKey, Value: "rid-log-1"})
+
+	if err := s.Process(newFakeStream(first)); err != nil {
+		t.Fatalf("err=%v", err)
+	}
+
+	rec.mu.Lock()
+	defer rec.mu.Unlock()
+	var sawRouting, sawReceived bool
+	for _, e := range rec.entries {
+		if strings.Contains(e, "routing request") && strings.Contains(e, "rid-log-1") {
+			sawRouting = true
+		}
+		if strings.Contains(e, "EPP received request") &&
+			strings.Contains(e, "rid-log-1") && strings.Contains(e, "pool-a") {
+			sawReceived = true
+		}
+	}
+	if !sawRouting {
+		t.Fatalf("demux routing log missing request id; entries=%v", rec.entries)
+	}
+	if !sawReceived {
+		t.Fatalf("llm-d received log missing request id and/or pool; entries=%v", rec.entries)
 	}
 }
 

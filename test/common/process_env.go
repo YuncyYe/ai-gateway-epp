@@ -75,6 +75,14 @@ type Process struct {
 // StartProcess launches argv[0] with args, redirecting output to logPath.
 func StartProcess(t fatalT, logDir, name string, args ...string) *Process {
 	t.Helper()
+	return StartProcessWithEnv(t, logDir, name, nil, args...)
+}
+
+// StartProcessWithEnv is StartProcess with extra environment variables
+// (appended to the parent process environment). Used by the local-config
+// scenario to pass AI_GATEWAY_EPP_LOCAL_CONFIG_DIR to a child epp.
+func StartProcessWithEnv(t fatalT, logDir, name string, env []string, args ...string) *Process {
+	t.Helper()
 	logPath := filepath.Join(logDir, name+".log")
 	logFile, err := os.Create(logPath)
 	if err != nil {
@@ -83,6 +91,9 @@ func StartProcess(t fatalT, logDir, name string, args ...string) *Process {
 	cmd := exec.Command(args[0], args[1:]...)
 	cmd.Stdout = logFile
 	cmd.Stderr = logFile
+	if len(env) > 0 {
+		cmd.Env = append(os.Environ(), env...)
+	}
 	if err := cmd.Start(); err != nil {
 		logFile.Close()
 		t.Fatalf("start %s: %v", name, err)
