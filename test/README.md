@@ -28,7 +28,7 @@ go test ./test/implementation/scenario-SC01-.../ -v      # 单场景
 go test ./test/implementation/scenario-SC01-.../ -run TestTC01 -v
 ```
 
-> 注意：每个场景包会真实拉起 epp + sim 子进程，11 个包默认全并行时
+> 注意：每个场景包会真实拉起 epp + sim 子进程（SC15 本地配置文件加载除外：不启动 sim，端点用保留回环端口，不访问推理后端），15 个包默认全并行时
 > Windows 上偶发 30s 就绪窗口超时（重跑即过，失败位置不固定）。负载
 > 较高的机器建议 `-p 4`，CI 可用 `-p 2`。
 
