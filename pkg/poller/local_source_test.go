@@ -99,7 +99,7 @@ func TestLocalFileSource_EppDataConfig(t *testing.T) {
 	cfg := innerapi.EppDataConfig{
 		EppConfig: map[string]json.RawMessage{"c1": json.RawMessage(`{"plugins":[]}`)},
 		Assignment: map[string]innerapi.AssignmentEntry{
-			"c1": {Primary: ptr("epp-1"), Standby: nil},
+			"c1": {Group: "g1"},
 		},
 	}
 	writeFile(t, dir, "epp_data_config.json", mustMarshal(t, cfg))
@@ -115,7 +115,7 @@ func TestLocalFileSource_EppDataConfig(t *testing.T) {
 	if ver != "" {
 		t.Fatalf("expected empty version, got %q", ver)
 	}
-	if data.Assignment["c1"].Primary == nil || *data.Assignment["c1"].Primary != "epp-1" {
+	if data.Assignment["c1"].Group != "g1" {
 		t.Fatalf("assignment = %+v", data.Assignment)
 	}
 }

@@ -53,29 +53,28 @@ func stubCompile(version string, err error) CompileFunc {
 	}
 }
 
-func TestEnsureAndPromoteDemote(t *testing.T) {
+func TestEnsureCreatesCell(t *testing.T) {
 	m, ctx, _ := newTestManager(t, stubCompile("v", nil))
 
-	c, err := m.Ensure(ctx, "cluster-a", RoleStandby)
+	c, err := m.Ensure(ctx, "cluster-a")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if c.Role() != RoleStandby || c.State() != StateCreating {
-		t.Fatalf("role=%v state=%v", c.Role(), c.State())
+	if c.State() != StateCreating {
+		t.Fatalf("state=%v, want StateCreating", c.State())
 	}
 
-	m.Promote("cluster-a")
-	if c.Role() != RolePrimary || c.State() != StatePrimary {
-		t.Fatalf("after promote: role=%v state=%v", c.Role(), c.State())
+	// Ensure is idempotent: a second call returns the same cell.
+	again, err := m.Ensure(ctx, "cluster-a")
+	if err != nil {
+		t.Fatal(err)
 	}
-
-	m.Demote("cluster-a")
-	if c.Role() != RoleStandby || c.State() != StateStandby {
-		t.Fatalf("after demote: role=%v state=%v", c.Role(), c.State())
+	if again != c {
+		t.Fatalf("second Ensure returned a different cell")
 	}
-
-	// Demote on an unknown key is a no-op.
-	m.Demote("nope")
+	if got := len(m.List()); got != 1 {
+		t.Fatalf("List() = %d cells, want 1", got)
+	}
 }
 
 func TestApplyConfigHotSwap(t *testing.T) {
@@ -86,7 +85,7 @@ func TestApplyConfigHotSwap(t *testing.T) {
 	}
 	m, ctx, _ := newTestManager(t, compile)
 
-	if _, err := m.Ensure(ctx, "cluster-a", RoleStandby); err != nil {
+	if _, err := m.Ensure(ctx, "cluster-a"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -119,7 +118,7 @@ func TestApplyConfigHotSwap(t *testing.T) {
 
 func TestApplyConfigCompileFailureKeepsOld(t *testing.T) {
 	m, ctx, _ := newTestManager(t, stubCompile("v", nil))
-	if _, err := m.Ensure(ctx, "cluster-a", RoleStandby); err != nil {
+	if _, err := m.Ensure(ctx, "cluster-a"); err != nil {
 		t.Fatal(err)
 	}
 	good := json.RawMessage(`{"a":1}`)
@@ -148,7 +147,7 @@ func TestApplyConfigUnassigned(t *testing.T) {
 
 func TestDropRemovesCell(t *testing.T) {
 	m, ctx, _ := newTestManager(t, stubCompile("v", nil))
-	c, err := m.Ensure(ctx, "cluster-a", RoleStandby)
+	c, err := m.Ensure(ctx, "cluster-a")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -176,11 +175,11 @@ func TestGetAndList(t *testing.T) {
 		t.Fatalf("List on empty manager returned %d cells", len(got))
 	}
 
-	a, err := m.Ensure(ctx, "a", RoleStandby)
+	a, err := m.Ensure(ctx, "a")
 	if err != nil {
 		t.Fatal(err)
 	}
-	b, err := m.Ensure(ctx, "b", RoleStandby)
+	b, err := m.Ensure(ctx, "b")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -249,7 +248,7 @@ func TestEnsureConcurrentSingleWinner(t *testing.T) {
 	errs := make(chan error, n)
 	for i := 0; i < n; i++ {
 		go func() {
-			_, err := m.Ensure(context.Background(), "race-key", RoleStandby)
+			_, err := m.Ensure(context.Background(), "race-key")
 			errs <- err
 		}()
 	}
@@ -293,7 +292,7 @@ func TestEnsureNewCellError(t *testing.T) {
 	m, ctx, _ := newTestManager(t, stubCompile("v", nil))
 	m.newCell = func(context.Context, Key) (*Cell, error) { return nil, boom }
 
-	_, err := m.Ensure(ctx, "fail-key", RoleStandby)
+	_, err := m.Ensure(ctx, "fail-key")
 	if !errors.Is(err, boom) {
 		t.Fatalf("Ensure() error = %v, want it to wrap %v", err, boom)
 	}
@@ -302,78 +301,72 @@ func TestEnsureNewCellError(t *testing.T) {
 	}
 }
 
-func TestPromoteFromCreating(t *testing.T) {
+func TestEnsureConcurrentWithDrainingCell(t *testing.T) {
 	m, ctx, _ := newTestManager(t, stubCompile("v", nil))
-	c, err := m.Ensure(ctx, "p-key", RoleStandby)
+	c, err := m.Ensure(ctx, "p-key")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if c.State() != StateCreating {
-		t.Fatalf("state=%v, want StateCreating before promote", c.State())
+		t.Fatalf("state=%v, want StateCreating", c.State())
 	}
 
-	m.Promote("p-key")
-	if c.Role() != RolePrimary || c.State() != StatePrimary {
-		t.Fatalf("after promote: role=%v state=%v", c.Role(), c.State())
-	}
-
-	// Promote is idempotent.
-	m.Promote("p-key")
-	if c.Role() != RolePrimary || c.State() != StatePrimary {
-		t.Fatalf("after second promote: role=%v state=%v", c.Role(), c.State())
+	// markReady performs the CREATING -> ACTIVE transition.
+	c.markReady()
+	if c.State() != StateActive {
+		t.Fatalf("state=%v, want StateActive after markReady", c.State())
 	}
 }
 
-func TestPromoteDemoteOnDrainingCell(t *testing.T) {
+func TestEnsureOnDrainingCell(t *testing.T) {
 	m, ctx, _ := newTestManager(t, stubCompile("v", nil))
-	c, err := m.Ensure(ctx, "d-key", RoleStandby)
+	c, err := m.Ensure(ctx, "d-key")
 	if err != nil {
 		t.Fatal(err)
 	}
 	c.setState(StateDraining)
 
-	m.Promote("d-key")
-	if c.Role() != RoleStandby || c.State() != StateDraining {
-		t.Fatalf("promote on draining: role=%v state=%v", c.Role(), c.State())
+	// Ensure on a draining cell returns it as-is (no resurrection).
+	got, err := m.Ensure(ctx, "d-key")
+	if err != nil {
+		t.Fatal(err)
 	}
-	m.Demote("d-key")
-	if c.Role() != RoleStandby || c.State() != StateDraining {
-		t.Fatalf("demote on draining: role=%v state=%v", c.Role(), c.State())
+	if got != c || c.State() != StateDraining {
+		t.Fatalf("ensure on draining: state=%v", c.State())
 	}
 
-	// Unknown keys are no-ops too.
-	m.Promote("nope")
+	// Unknown keys are no-ops for Drop.
 	m.Drop("nope")
 }
 
-func TestDemoteDrainsEngine(t *testing.T) {
+func TestSwapDrainsOldEngine(t *testing.T) {
 	engCtx, engCancel := context.WithCancel(context.Background())
 	compile := func(_ context.Context, key Key, raw json.RawMessage, c *Cell) (*Engine, error) {
 		return &Engine{Version: HashConfig(raw), ctx: engCtx, cancel: engCancel}, nil
 	}
 	m, ctx, _ := newTestManager(t, compile)
-	if _, err := m.Ensure(ctx, "demote-drain", RolePrimary); err != nil {
+	if _, err := m.Ensure(ctx, "swap-drain"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := m.ApplyConfig(ctx, "demote-drain", json.RawMessage(`{"a":1}`)); err != nil {
+	if _, err := m.ApplyConfig(ctx, "swap-drain", json.RawMessage(`{"a":1}`)); err != nil {
 		t.Fatal(err)
 	}
 
-	m.Demote("demote-drain")
+	// Swapping to a new config drains the old engine.
+	if _, err := m.ApplyConfig(ctx, "swap-drain", json.RawMessage(`{"a":2}`)); err != nil {
+		t.Fatal(err)
+	}
 
 	select {
 	case <-engCtx.Done():
 	case <-time.After(2 * time.Second):
-		t.Fatal("engine not drained after demote")
-	}
-	if c, _ := m.Get("demote-drain"); c.State() != StateStandby {
-		t.Fatalf("state=%v, want StateStandby", c.State())
+		t.Fatal("old engine not drained after swap")
 	}
 }
 
 func TestDropWithEngineRemovesCell(t *testing.T) {
 	m, ctx, _ := newTestManager(t, stubCompile("v", nil))
-	c, err := m.Ensure(ctx, "drop-eng", RolePrimary)
+	c, err := m.Ensure(ctx, "drop-eng")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -397,7 +390,7 @@ func TestDropWithEngineRemovesCell(t *testing.T) {
 
 func TestApplyConfigOnDrainingCell(t *testing.T) {
 	m, ctx, _ := newTestManager(t, stubCompile("v", nil))
-	if _, err := m.Ensure(ctx, "drain-cfg", RoleStandby); err != nil {
+	if _, err := m.Ensure(ctx, "drain-cfg"); err != nil {
 		t.Fatal(err)
 	}
 	m.Drop("drain-cfg")
@@ -421,7 +414,7 @@ func TestApplyConfigConcurrentSwap(t *testing.T) {
 		return &Engine{Version: HashConfig(raw)}, nil
 	}
 	m, ctx, _ := newTestManager(t, compile)
-	if _, err := m.Ensure(ctx, "swap-key", RolePrimary); err != nil {
+	if _, err := m.Ensure(ctx, "swap-key"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -458,7 +451,7 @@ func TestApplyConfigConcurrentSwap(t *testing.T) {
 
 func TestWaitReady(t *testing.T) {
 	m, ctx, _ := newTestManager(t, stubCompile("v", nil))
-	c, err := m.Ensure(ctx, "ready-key", RoleStandby)
+	c, err := m.Ensure(ctx, "ready-key")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -523,18 +516,10 @@ func TestManagerConcurrentStress(t *testing.T) {
 			k := keys[i%len(keys)]
 			cfg := json.RawMessage(fmt.Sprintf(`{"i":%d}`, i))
 			switch i % 6 {
-			case 0:
-				if _, err := m.Ensure(ctx, k, RolePrimary); err != nil {
+			case 0, 1, 2, 3:
+				if _, err := m.Ensure(ctx, k); err != nil {
 					t.Errorf("Ensure() error = %v", err)
 				}
-			case 1:
-				if _, err := m.Ensure(ctx, k, RoleStandby); err != nil {
-					t.Errorf("Ensure() error = %v", err)
-				}
-			case 2:
-				m.Promote(k)
-			case 3:
-				m.Demote(k)
 			case 4, 5:
 				if _, err := m.ApplyConfig(ctx, k, cfg); err != nil && !errors.Is(err, ErrNotAssigned) {
 					t.Errorf("ApplyConfig() error = %v", err)

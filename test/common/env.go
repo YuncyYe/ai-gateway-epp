@@ -74,9 +74,9 @@ func WithSimFakeMetrics(fake map[string]string) EnvOption {
 
 // NewEnv starts mock API + one sim per logical name + epp. clusters maps a
 // cluster name to the logical sim names backing it; a logical name appearing
-// in multiple clusters shares one sim process. Every cluster is assigned
-// "primary" to this instance and gets a minimal working epp_config.
-func NewEnv(t *testing.T, instanceID string, clusters map[string][]string, opts ...EnvOption) *Env {
+// in multiple clusters shares one sim process. Every cluster is assigned to
+// this instance's group (eppGroup) and gets a minimal working epp_config.
+func NewEnv(t *testing.T, eppGroup string, clusters map[string][]string, opts ...EnvOption) *Env {
 	t.Helper()
 	cfg := &envConfig{eppConfigFn: func(cluster string) json.RawMessage { return EppConfig(cluster, false) }}
 	for _, o := range opts {
@@ -121,15 +121,15 @@ func NewEnv(t *testing.T, instanceID string, clusters map[string][]string, opts 
 			})
 		}
 		table[cluster] = map[string][]map[string]any{"sub-1": BackendMap(backends...)}
-		assign[cluster] = "primary"
+		assign[cluster] = "" // assigned to this instance's group (SetDefaultGroup)
 		configs[cluster] = cfg.eppConfigFn(cluster)
 	}
-	e.API.SetDefaultInstance(instanceID)
+	e.API.SetDefaultGroup(eppGroup)
 	e.API.SetAssignment(assign)
 	e.API.SetEppConfig(configs)
 	e.API.SetClusterTable(table)
 
-	e.EPP = StartEPP(t, logDir, e.API.Addr(), instanceID, cfg.eppArgs...)
+	e.EPP = StartEPP(t, logDir, e.API.Addr(), eppGroup, cfg.eppArgs...)
 	e.EPP.WaitHealth(t, "", 30*time.Second)
 	return e
 }

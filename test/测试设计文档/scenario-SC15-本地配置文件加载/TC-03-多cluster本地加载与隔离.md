@@ -19,7 +19,7 @@
 本地配置目录：
 
 - `cluster_table.json`：`cluster-a.sub-1 = [portA]`、`cluster-b.sub-1 = [portB]`（不同保留端口）。
-- `epp_data_config.json`：`epp_config` 含 cluster-a、cluster-b 两份最小配置（各自 `clusterName` 指向自身）；`assignment` 两个 cluster 均为本实例 primary。
+- `epp_data_config.json`：`epp_config` 含 cluster-a、cluster-b 两份最小配置（各自 `clusterName` 指向自身）；`assignment` 两个 cluster 均分配到本实例组。
 - `epp_pool.json` 占位。
 
 ## 测试步骤
@@ -28,7 +28,7 @@
 |---|---|---|
 | 1 | 启动并 `WaitHealth("", 30s)` | readiness SERVING |
 | 2 | 断言 `ai_epp_engine_current_version{cluster="cluster-a"}` 与 `{cluster="cluster-b"}` 均非空 | 两份 epp_config 均编译 |
-| 3 | 断言 `ai_epp_cell_state` 中 cluster-a、cluster-b 均为 `role="primary",state="primary"` = 1 | 两 cluster 均建主 cell |
+| 3 | 断言 `ai_epp_cell_state` 中 cluster-a、cluster-b 均为 `state="active"` = 1 | 两 cluster 均建 cell |
 | 4 | ext-proc pick `pool="cluster-a"` | 返回 `127.0.0.1:portA` |
 | 5 | ext-proc pick `pool="cluster-b"` | 返回 `127.0.0.1:portB` |
 

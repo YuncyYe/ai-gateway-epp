@@ -69,6 +69,10 @@ func run() error {
 		return nil
 	}
 
+	if err := cfg.Validate(); err != nil {
+		return err
+	}
+
 	//stdlf := stdlog.LstdFlags | stdlog.Lshortfile
 	stdlf := stdlog.LstdFlags | stdlog.Llongfile
 	stdl := stdlog.New(os.Stderr, "", stdlf)
@@ -108,7 +112,7 @@ func run() error {
 			_, ok := manager.Get(cell.Key(cluster))
 			return ok
 		}, nil)
-		eppData := poller.NewEppDataWatcher(nil, cfg.InstanceID, manager, logger)
+		eppData := poller.NewEppDataWatcher(nil, cfg.EppGroup, manager, logger)
 
 		discoveryHandle = discovery.Handle
 		eppDataHandle = eppData.Handle
@@ -119,7 +123,7 @@ func run() error {
 			_, ok := manager.Get(cell.Key(cluster))
 			return ok
 		}, nil)
-		eppData := poller.NewEppDataWatcher(client, cfg.InstanceID, manager, logger)
+		eppData := poller.NewEppDataWatcher(client, cfg.EppGroup, manager, logger)
 
 		discoverySrc = discovery
 		eppDataSrc = eppData
@@ -198,7 +202,7 @@ func run() error {
 
 	logger.Info("epp started",
 		"version", version,
-		"instance", cfg.InstanceID,
+		"eppGroup", cfg.EppGroup,
 		"grpcPort", cfg.GRPCPort,
 		"healthPort", cfg.HealthPort,
 		"metricsPort", cfg.MetricsPort,

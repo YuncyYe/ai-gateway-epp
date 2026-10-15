@@ -58,13 +58,12 @@ type EppDataConfig struct {
 	Assignment map[string]AssignmentEntry `json:"assignment"`
 }
 
-// AssignmentEntry is one cluster's instance group in the full assignment
-// view. Primary/Standby hold instance ids; a null Primary is abnormal (the
-// cluster matches no instance as primary), a null Standby is a
-// single-instance group.
+// AssignmentEntry is one cluster's assigned EPP group in the assignment
+// section: the assignment granularity is the group (single-instance stage:
+// exactly one instance per group). The EPP instance matches by its own
+// group name (-epp-group).
 type AssignmentEntry struct {
-	Primary *string `json:"primary"`
-	Standby *string `json:"standby"`
+	Group string `json:"group"`
 }
 
 // Client is a thin HTTP client for the InnerAPI. It is safe for concurrent

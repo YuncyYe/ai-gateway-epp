@@ -17,6 +17,9 @@ FROM --platform=${BUILDPLATFORM} golang:1.26-alpine AS build
 ARG TARGETARCH
 ARG TARGETOS
 ARG ALPINE_MIRROR=
+# 版本信息注入（由 Makefile 通过 --build-arg 传入；缺省时镜像内二进制无版本号）
+ARG EPP_VERSION=
+ARG GIT_COMMIT=
 
 WORKDIR /src
 
@@ -37,7 +40,9 @@ ENV GOTOOLCHAIN=local
 RUN set -ex; \
   GOOS=${TARGETOS:-linux} \
   GOARCH=${TARGETARCH:-$(go env GOARCH)} \
-  go build -trimpath -ldflags "-s -w" -o /out/epp ./cmd/epp
+  go build -trimpath \
+  -ldflags "-s -w -X main.version=v${EPP_VERSION} -X main.commit=${GIT_COMMIT}" \
+  -o /out/epp ./cmd/epp
 
 FROM alpine:3.19
 
@@ -55,6 +60,8 @@ RUN set -ex; \
 WORKDIR /home/work/epp
 
 COPY --from=build /out/epp ./epp
+# 本地文件模式样例配置（epp_data_config.json / cluster_table.json / epp_pool.json）
+COPY conf ./conf
 
 RUN mkdir -p ./log \
   && chown -R app:app /home/work/epp

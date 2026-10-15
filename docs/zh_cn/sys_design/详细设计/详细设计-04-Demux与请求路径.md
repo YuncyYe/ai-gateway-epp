@@ -45,7 +45,7 @@ Process(stream):
   if !ok: return ErrUnknownPool + metrics demux_errors_total{reason=unknown-pool}
   defer recover():  单请求 panic 转错误返回，进程与其他 Cell 存活（故障域隔离）
   eng = c.engine.Load()
-  if c.role != primary: return ErrCellDraining（可重试，BFE 应重试到备）+ metrics
+  if cell 不存在或引擎缺失（eng == nil）: return ErrCellDraining（可重试，BFE 重试/回退本地均衡）+ metrics  // 无角色判断：持有即服务
 
   ── 以下为 llm-d 标准阶段处理，全部组件来自 eng 与 c.ds ──
   RequestHeaders: 提取 trace/context → 等 RequestBody

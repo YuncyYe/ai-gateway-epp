@@ -17,7 +17,7 @@
 ## 前置条件
 
 1. harness 已构建 epp 二进制；inference-sim 二进制可用。
-2. mock API 已配置 assignment 全量视图（cluster-a → 本实例 primary、cluster-b=primary）、两个 cluster 的 epp_config v1（最小配置）、cluster_table（cluster-a=[sim a0, Weight=50]、cluster-b=[sim b0, Weight=50]）。
+2. mock API 已配置 assignment 段（cluster-a、cluster-b 均分配到本实例组）、两个 cluster 的 epp_config v1（最小配置）、cluster_table（cluster-a=[sim a0, Weight=50]、cluster-b=[sim b0, Weight=50]）。
 3. epp 启动并就绪，`ai_epp_engine_current_version` 中 cluster-a、cluster-b 的版本值均存在且非空，分别记为 va、vb。
 4. 轮询间隔 200ms，版本变化观察窗口 20s。
 

@@ -27,8 +27,6 @@ import (
 	llmdenvoy "github.com/llm-d/llm-d-router/pkg/common/envoy"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 	ctrllog "sigs.k8s.io/controller-runtime/pkg/log"
-
-	"github.com/rainway-ai-gateway/ai-gateway-epp/pkg/cell"
 )
 
 // Server is the multi-pool external processor. One Server serves every cell;
@@ -115,11 +113,13 @@ func (s *Server) Process(stream extProcPb.ExternalProcessor_ProcessServer) (retE
 	}
 
 	eng := c.Engine()
-	if eng == nil || c.Role() != cell.RolePrimary {
+	if eng == nil {
+		// Cell held but engine not compiled yet (or already drained): the
+		// request may be retried.
 		demuxErrors.WithLabelValues("cell-draining").Inc()
 		return toStatus(ErrCellDraining)
 	}
-	reqLogger.V(2).Info("cell routed", "pool", pool, "role", c.Role().String(), "engineVersion", eng.Version)
+	reqLogger.V(2).Info("cell routed", "pool", pool, "engineVersion", eng.Version)
 
 	done, ok := c.Track(eng)
 	if !ok {

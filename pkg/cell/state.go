@@ -14,43 +14,16 @@
 
 package cell
 
-// Key identifies a Cell; it equals the cluster name carried in the
-// inference-pool ext-proc metadata and the cluster_table config key.
-type Key string
-
-// Role is this instance's assignment for a cluster.
-type Role int32
-
-const (
-	// RoleNone: freshly created, assignment not yet applied.
-	RoleNone Role = iota
-	// RoleStandby: keeps hot data, admits no traffic.
-	RoleStandby
-	// RolePrimary: serves traffic.
-	RolePrimary
-)
-
-func (r Role) String() string {
-	switch r {
-	case RoleStandby:
-		return "standby"
-	case RolePrimary:
-		return "primary"
-	default:
-		return "none"
-	}
-}
-
-// State is the Cell lifecycle state.
+// State is the Cell lifecycle state. There is no role dimension: a held cell
+// always serves (single-instance group model, see
+// docs/zh_cn/modifications/2026-10-14-epp-single-instance/).
 type State int32
 
 const (
 	// StateCreating: created, waiting for discovery sync and first engine compile.
 	StateCreating State = iota
-	// StateStandby: ready as standby.
-	StateStandby
-	// StatePrimary: ready and serving.
-	StatePrimary
+	// StateActive: ready and serving.
+	StateActive
 	// StateDraining: assignment removed, tearing down.
 	StateDraining
 )
@@ -59,10 +32,8 @@ func (s State) String() string {
 	switch s {
 	case StateCreating:
 		return "creating"
-	case StateStandby:
-		return "standby"
-	case StatePrimary:
-		return "primary"
+	case StateActive:
+		return "active"
 	case StateDraining:
 		return "draining"
 	default:

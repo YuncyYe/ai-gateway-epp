@@ -51,29 +51,23 @@ func stubCompileOK(version string) cell.CompileFunc {
 	}
 }
 
-func sp(s string) *string { return &s }
-
-func TestResolveRole(t *testing.T) {
+func TestResolveAssignmentEntry(t *testing.T) {
 	tests := []struct {
 		name string
 		self string
 		e    innerapi.AssignmentEntry
-		role cell.Role
 		mine bool
 	}{
-		{"primary hit", "epp-1", innerapi.AssignmentEntry{Primary: sp("epp-1"), Standby: sp("epp-2")}, cell.RolePrimary, true},
-		{"standby hit", "epp-2", innerapi.AssignmentEntry{Primary: sp("epp-1"), Standby: sp("epp-2")}, cell.RoleStandby, true},
-		{"no hit", "epp-3", innerapi.AssignmentEntry{Primary: sp("epp-1"), Standby: sp("epp-2")}, cell.RoleNone, false},
-		{"single instance group standby null", "epp-1", innerapi.AssignmentEntry{Primary: sp("epp-1")}, cell.RolePrimary, true},
-		{"empty entry", "epp-1", innerapi.AssignmentEntry{}, cell.RoleNone, false},
-		{"null primary abnormal standby hit", "epp-2", innerapi.AssignmentEntry{Standby: sp("epp-2")}, cell.RoleStandby, true},
-		{"no wildcard", "epp-*", innerapi.AssignmentEntry{Primary: sp("*")}, cell.RoleNone, false},
+		{"group hit", "g1", innerapi.AssignmentEntry{Group: "g1"}, true},
+		{"group miss", "g1", innerapi.AssignmentEntry{Group: "g2"}, false},
+		{"empty entry never matches", "g1", innerapi.AssignmentEntry{}, false},
+		{"unset self group matches nothing", "", innerapi.AssignmentEntry{Group: "g1"}, false},
+		{"no wildcard", "g*", innerapi.AssignmentEntry{Group: "*"}, false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			role, mine := resolveRole(tt.self, tt.e)
-			if role != tt.role || mine != tt.mine {
-				t.Fatalf("resolveRole(%q, %+v) = %v, %v; want %v, %v", tt.self, tt.e, role, mine, tt.role, tt.mine)
+			if mine := resolveAssignmentEntry(tt.self, tt.e); mine != tt.mine {
+				t.Fatalf("resolveAssignmentEntry(%q, %+v) = %v, want %v", tt.self, tt.e, mine, tt.mine)
 			}
 		})
 	}
@@ -107,8 +101,8 @@ func newObservingServer(t *testing.T, payload string) *observingServer {
 
 func TestEppDataFetchChanged(t *testing.T) {
 	o := newObservingServer(t, `{"ErrNum":200,"ErrMsg":"ok","Data":{"Version":"v4","Config":{`+
-		`"epp_config":{"c-a":{"x":1}},"assignment":{"c-a":{"primary":"epp-1"}}}}}`)
-	w := NewEppDataWatcher(innerapi.NewClient(o.srv.URL, "", time.Second), "epp-1", nil, logr.Discard())
+		`"epp_config":{"c-a":{"x":1}},"assignment":{"c-a":{"group":"g1"}}}}}`)
+	w := NewEppDataWatcher(innerapi.NewClient(o.srv.URL, "", time.Second), "g1", nil, logr.Discard())
 
 	changed, ver, cfg, err := w.Fetch(context.Background(), "v3")
 	if err != nil {
@@ -120,17 +114,14 @@ func TestEppDataFetchChanged(t *testing.T) {
 	if string(cfg.EppConfig["c-a"]) != `{"x":1}` {
 		t.Fatalf("epp_config=%v", cfg.EppConfig)
 	}
-	if cfg.Assignment["c-a"].Primary == nil || *cfg.Assignment["c-a"].Primary != "epp-1" {
+	if cfg.Assignment["c-a"].Group != "g1" {
 		t.Fatalf("assignment=%+v", cfg.Assignment)
-	}
-	if cfg.Assignment["c-a"].Standby != nil {
-		t.Fatalf("standby=%v, want nil", *cfg.Assignment["c-a"].Standby)
 	}
 }
 
 func TestEppDataFetchUnchanged(t *testing.T) {
 	o := newObservingServer(t, `{"ErrNum":200,"ErrMsg":"ok","Data":null}`)
-	w := NewEppDataWatcher(innerapi.NewClient(o.srv.URL, "", time.Second), "epp-1", nil, logr.Discard())
+	w := NewEppDataWatcher(innerapi.NewClient(o.srv.URL, "", time.Second), "g1", nil, logr.Discard())
 
 	changed, ver, cfg, err := w.Fetch(context.Background(), "v3")
 	if err != nil {
@@ -146,32 +137,24 @@ func TestEppDataFetchUnchanged(t *testing.T) {
 
 func TestEppDataFetchServerError(t *testing.T) {
 	o := newObservingServer(t, `{"ErrNum":500,"ErrMsg":"boom"}`)
-	w := NewEppDataWatcher(innerapi.NewClient(o.srv.URL, "", time.Second), "epp-1", nil, logr.Discard())
+	w := NewEppDataWatcher(innerapi.NewClient(o.srv.URL, "", time.Second), "g1", nil, logr.Discard())
 	if _, _, _, err := w.Fetch(context.Background(), ""); err == nil {
 		t.Fatal("expected error")
 	}
 }
 
-// TestEppDataHandleLifecycle drives the full role/config diff sequence in one
-// snapshot stream: ensure, promote, demote, drop, per-cluster compile
-// isolation, and zero report posts.
+// TestEppDataHandleLifecycle drives the full assignment/config diff sequence
+// in one snapshot stream: ensure, reassignment (drop + ensure), per-cluster
+// compile isolation, and zero report posts.
 func TestEppDataHandleLifecycle(t *testing.T) {
 	o := newObservingServer(t, `{"ErrNum":200,"ErrMsg":"ok","Data":null}`)
 	rec := &compileRecorder{versions: map[cell.Key]string{}}
 	m := newTestManager(t, rec.compile)
-	w := NewEppDataWatcher(innerapi.NewClient(o.srv.URL, "", time.Second), "epp-1", m, logr.Discard())
+	w := NewEppDataWatcher(innerapi.NewClient(o.srv.URL, "", time.Second), "g1", m, logr.Discard())
 	ctx := context.Background()
 
-	entry := func(primary, standby string) innerapi.AssignmentEntry {
-		e := innerapi.AssignmentEntry{Primary: sp(primary)}
-		if standby != "" {
-			e.Standby = sp(standby)
-		}
-		return e
-	}
-
-	// Round 1: c-a primary (with peer), c-b standby, c-c belongs to another
-	// instance, c-d config present but no role in the assignment.
+	// Round 1: c-a and c-b assigned to g1 (ours), c-c assigned to another
+	// group, c-d config present but no assignment entry.
 	cfg := innerapi.EppDataConfig{
 		EppConfig: map[string]json.RawMessage{
 			"c-a": json.RawMessage(`{"a":1}`),
@@ -180,35 +163,35 @@ func TestEppDataHandleLifecycle(t *testing.T) {
 			"c-d": json.RawMessage(`{"a":4}`),
 		},
 		Assignment: map[string]innerapi.AssignmentEntry{
-			"c-a": entry("epp-1", "epp-2"),
-			"c-b": entry("epp-9", "epp-1"),
-			"c-c": entry("epp-9", "epp-8"),
+			"c-a": {Group: "g1"},
+			"c-b": {Group: "g1"},
+			"c-c": {Group: "g2"},
 		},
 	}
 	if err := w.Handle(ctx, cfg); err != nil {
 		t.Fatal(err)
 	}
 
-	if c, ok := m.Get("c-a"); !ok || c.Role() != cell.RolePrimary {
-		t.Fatalf("c-a role=%v", c.Role())
+	if c, ok := m.Get("c-a"); !ok {
+		t.Fatal("c-a not created")
 	} else if c.Engine() == nil || c.Engine().Version != "v-c-a" {
 		t.Fatalf("c-a engine=%v", c.Engine())
 	}
 	if _, ok := m.Get("c-c"); ok {
-		t.Fatal("c-c created though assigned to another instance")
+		t.Fatal("c-c created though assigned to another group")
 	}
 	if _, ok := m.Get("c-d"); ok {
-		t.Fatal("c-d created though it has no assignment role")
+		t.Fatal("c-d created though it has no assignment entry")
 	}
 	if _, ok := rec.versions["c-c"]; ok {
-		t.Fatal("c-c config compiled without a role")
+		t.Fatal("c-c config compiled without an assignment")
 	}
 	if _, ok := rec.versions["c-d"]; ok {
-		t.Fatal("c-d config compiled without a role")
+		t.Fatal("c-d config compiled without an assignment")
 	}
 	// c-b compile failure is isolated; the cell exists but has no engine.
-	if c, ok := m.Get("c-b"); !ok || c.Role() != cell.RoleStandby {
-		t.Fatalf("c-b role=%v", c.Role())
+	if c, ok := m.Get("c-b"); !ok {
+		t.Fatal("c-b not created")
 	} else if c.Engine() != nil {
 		t.Fatal("broken cluster c-b got an engine")
 	}
@@ -216,32 +199,17 @@ func TestEppDataHandleLifecycle(t *testing.T) {
 		t.Fatal("broken cluster c-b reported success")
 	}
 
-	// Round 2: c-b demoted further (standby kept), c-a promoted from... c-a is
-	// already primary; flip c-a to the other instance and promote c-b.
+	// Round 2: c-a re-assigned to another group (dropped), c-c re-assigned
+	// to g1 (ensured).
 	cfg = innerapi.EppDataConfig{
 		EppConfig: map[string]json.RawMessage{
-			"c-b": json.RawMessage(`{"b":1}`),
+			"c-c": json.RawMessage(`{"c":1}`),
 		},
 		Assignment: map[string]innerapi.AssignmentEntry{
-			"c-a": entry("epp-2", "epp-1"), // we are standby now
-			"c-b": entry("epp-1", ""),      // promoted to primary, single-instance group
+			"c-c": {Group: "g1"},
 		},
 	}
 	if err := w.Handle(ctx, cfg); err != nil {
-		t.Fatal(err)
-	}
-	if c, _ := m.Get("c-a"); c.Role() != cell.RoleStandby {
-		t.Fatalf("c-a role=%v, want standby after demote", c.Role())
-	}
-	if c, _ := m.Get("c-b"); c.Role() != cell.RolePrimary {
-		t.Fatalf("c-b role=%v, want primary after promote", c.Role())
-	}
-	if rec.versions["c-b"] != "v-c-b" {
-		t.Fatalf("c-b not compiled after promotion: %v", rec.versions)
-	}
-
-	// Round 3: all roles revoked -> every cell dropped and no report posted.
-	if err := w.Handle(ctx, innerapi.EppDataConfig{}); err != nil {
 		t.Fatal(err)
 	}
 	deadline := time.Now().Add(5 * time.Second)
@@ -250,7 +218,25 @@ func TestEppDataHandleLifecycle(t *testing.T) {
 			break
 		}
 		if time.Now().After(deadline) {
-			t.Fatal("c-a not dropped after role revoked")
+			t.Fatal("c-a not dropped after reassignment")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if c, _ := m.Get("c-c"); c.Engine() == nil {
+		t.Fatal("c-c not compiled after reassignment to g1")
+	}
+
+	// Round 3: all assignments revoked -> every cell dropped, no report posted.
+	if err := w.Handle(ctx, innerapi.EppDataConfig{}); err != nil {
+		t.Fatal(err)
+	}
+	deadline = time.Now().Add(5 * time.Second)
+	for {
+		if _, ok := m.Get("c-c"); !ok {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("c-c not dropped after assignment revoked")
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
@@ -269,10 +255,10 @@ func TestEppDataHandleEnsureError(t *testing.T) {
 		DrainWorkers: 1,
 		NewCell:      func(ctx context.Context, key cell.Key) (*cell.Cell, error) { return nil, errors.New("create boom") },
 	})
-	w := NewEppDataWatcher(nil, "epp-1", m, logr.Discard())
+	w := NewEppDataWatcher(nil, "g1", m, logr.Discard())
 
 	cfg := innerapi.EppDataConfig{
-		Assignment: map[string]innerapi.AssignmentEntry{"c-a": {Primary: sp("epp-1")}},
+		Assignment: map[string]innerapi.AssignmentEntry{"c-a": {Group: "g1"}},
 	}
 	err := w.Handle(context.Background(), cfg)
 	if err == nil || !strings.Contains(err.Error(), "ensure cell c-a") {
@@ -280,23 +266,23 @@ func TestEppDataHandleEnsureError(t *testing.T) {
 	}
 }
 
-// TestEppDataHandleNoAssignmentWarns exercises the "instance id matches no
-// role" path: no cells are created and the handler reports no error.
+// TestEppDataHandleNoAssignmentWarns exercises the "group matches no
+// assignment" path: no cells are created and the handler reports no error.
 func TestEppDataHandleNoAssignmentWarns(t *testing.T) {
 	m := newTestManager(t, stubCompileOK("v1"))
-	w := NewEppDataWatcher(nil, "epp-ghost", m, logr.Discard())
+	w := NewEppDataWatcher(nil, "g-ghost", m, logr.Discard())
 
 	cfg := innerapi.EppDataConfig{
 		EppConfig: map[string]json.RawMessage{"c-a": json.RawMessage(`{"a":1}`)},
 		Assignment: map[string]innerapi.AssignmentEntry{
-			"c-a": {Primary: sp("epp-1"), Standby: sp("epp-2")},
+			"c-a": {Group: "g1"},
 		},
 	}
 	if err := w.Handle(context.Background(), cfg); err != nil {
 		t.Fatal(err)
 	}
 	if len(m.List()) != 0 {
-		t.Fatalf("cells=%v, want none for an unmatched instance", m.List())
+		t.Fatalf("cells=%v, want none for an unmatched group", m.List())
 	}
 }
 

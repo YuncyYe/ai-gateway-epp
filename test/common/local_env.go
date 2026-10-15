@@ -33,7 +33,7 @@ import (
 // registration), not that inference traffic is served.
 type LocalEnv struct {
 	EPP         *EppEnv
-	InstanceID  string
+	Group       string
 	ConfigDir   string              // directory passed to --local-config-dir
 	Clusters    []string            // cluster names in declaration order
 	ClusterSims map[string][]string // cluster -> reserved "127.0.0.1:port" endpoints
@@ -69,7 +69,7 @@ type LocalEPPOptions struct {
 // port to accept connections (process up), without waiting for readiness:
 // fail-static tests expect a running but not-ready process and still need the
 // handle to scrape /metrics and heal the config.
-func StartLocalEPP(t fatalT, logDir, configDir, instanceID string, opts LocalEPPOptions) *EppEnv {
+func StartLocalEPP(t fatalT, logDir, configDir, eppGroup string, opts LocalEPPOptions) *EppEnv {
 	t.Helper()
 	bin := EppBinary(t)
 	grpcPort := FindFreePort(t)
@@ -77,7 +77,7 @@ func StartLocalEPP(t fatalT, logDir, configDir, instanceID string, opts LocalEPP
 	metricsPort := FindFreePort(t)
 	args := []string{
 		bin,
-		"-instance-id", instanceID,
+		"-epp-group", eppGroup,
 		"-poll-interval", "200ms",
 		"-poll-timeout", "1s",
 		"-grpc-port", fmt.Sprint(grpcPort),
@@ -115,10 +115,12 @@ func StartLocalEPP(t fatalT, logDir, configDir, instanceID string, opts LocalEPP
 type localEnvConfig struct {
 	eppArgs     []string
 	eppConfigFn func(cluster string) json.RawMessage
-	roles       map[string]string // cluster -> "primary" (default) / "standby"
-	useEnvVar   bool
+	// assignment: cluster -> group name. Clusters not listed are unassigned.
+	// Nil means every cluster is assigned to the instance's own group.
+	assignment map[string]string
+	useEnvVar  bool
 	observedAPI bool
-	skipPool    bool
+	skipPool   bool
 }
 
 // LocalEnvOption customizes NewLocalEnv.
@@ -135,10 +137,11 @@ func WithLocalEppConfigFn(fn func(cluster string) json.RawMessage) LocalEnvOptio
 	return func(c *localEnvConfig) { c.eppConfigFn = fn }
 }
 
-// WithLocalRoles sets the role this instance holds per cluster ("primary" or
-// "standby"); clusters not listed are primary.
-func WithLocalRoles(roles map[string]string) LocalEnvOption {
-	return func(c *localEnvConfig) { c.roles = roles }
+// WithLocalAssignment sets the assignment section: cluster -> group name.
+// Clusters not listed are unassigned; pass nil (default) to assign every
+// cluster to the instance's own group.
+func WithLocalAssignment(assignment map[string]string) LocalEnvOption {
+	return func(c *localEnvConfig) { c.assignment = assignment }
 }
 
 // WithLocalConfigEnvVar passes the config dir via
@@ -164,7 +167,7 @@ func WithoutLocalPoolFile() LocalEnvOption {
 // endpoint (no listener). Two of the three config files are consumed by epp
 // (cluster_table.json, epp_data_config.json); epp_pool.json is written for
 // parity with the documented layout unless WithoutLocalPoolFile is given.
-func NewLocalEnv(t *testing.T, instanceID string, clusters map[string][]string, opts ...LocalEnvOption) *LocalEnv {
+func NewLocalEnv(t *testing.T, eppGroup string, clusters map[string][]string, opts ...LocalEnvOption) *LocalEnv {
 	t.Helper()
 	cfg := &localEnvConfig{eppConfigFn: LocalEppConfig}
 	for _, o := range opts {
@@ -202,15 +205,15 @@ func NewLocalEnv(t *testing.T, instanceID string, clusters map[string][]string, 
 	}
 
 	e := &LocalEnv{
-		InstanceID:  instanceID,
+		Group:       eppGroup,
 		ConfigDir:   configDir,
 		Clusters:    clusterList,
 		ClusterSims: clusterSims,
 	}
 	WriteClusterTableFile(t, configDir, table)
-	WriteEppDataConfigFile(t, configDir, EppDataConfigFor(instanceID, clusterList, cfg.roles, cfg.eppConfigFn))
+	WriteEppDataConfigFile(t, configDir, EppDataConfigFor(eppGroup, clusterList, cfg.assignment, cfg.eppConfigFn))
 	if !cfg.skipPool {
-		WriteEppPoolFile(t, configDir, instanceID)
+		WriteEppPoolFile(t, configDir, eppGroup)
 	}
 
 	epOpts := LocalEPPOptions{EnvVar: cfg.useEnvVar, ExtraArgs: cfg.eppArgs}
@@ -218,7 +221,7 @@ func NewLocalEnv(t *testing.T, instanceID string, clusters map[string][]string, 
 		e.API = NewMockAPI(t)
 		epOpts.APIAddr = e.API.Addr()
 	}
-	e.EPP = StartLocalEPP(t, logDir, configDir, instanceID, epOpts)
+	e.EPP = StartLocalEPP(t, logDir, configDir, eppGroup, epOpts)
 	e.EPP.WaitHealth(t, "", 30*time.Second)
 	return e
 }
@@ -228,10 +231,11 @@ func NewLocalEnv(t *testing.T, instanceID string, clusters map[string][]string, 
 func LocalEppConfig(cluster string) json.RawMessage { return EppConfig(cluster, false) }
 
 // EppDataConfigFor builds the epp_data snapshot: every cluster gets a config
-// from configFn and an assignment entry giving instanceID a role from roles
-// ("standby" leaves a peer as primary; anything else makes instanceID
-// primary).
-func EppDataConfigFor(instanceID string, clusters []string, roles map[string]string, configFn func(cluster string) json.RawMessage) innerapi.EppDataConfig {
+// from configFn and an assignment entry mapping the cluster to a group.
+// assignment is cluster -> group name; nil assigns every cluster to the
+// instance's own group (eppGroup), a non-nil map leaves unlisted clusters
+// unassigned (no assignment entry).
+func EppDataConfigFor(eppGroup string, clusters []string, assignment map[string]string, configFn func(cluster string) json.RawMessage) innerapi.EppDataConfig {
 	cfg := innerapi.EppDataConfig{
 		EppConfig:  make(map[string]json.RawMessage, len(clusters)),
 		Assignment: make(map[string]innerapi.AssignmentEntry, len(clusters)),
@@ -240,11 +244,14 @@ func EppDataConfigFor(instanceID string, clusters []string, roles map[string]str
 		if configFn != nil {
 			cfg.EppConfig[c] = configFn(c)
 		}
-		if roles[c] == "standby" {
-			cfg.Assignment[c] = innerapi.AssignmentEntry{Primary: sp("peer-" + instanceID), Standby: sp(instanceID)}
-		} else {
-			cfg.Assignment[c] = innerapi.AssignmentEntry{Primary: sp(instanceID)}
+		group, ok := assignment[c]
+		if assignment != nil && !ok {
+			continue // unassigned
 		}
+		if assignment == nil || group == "" {
+			group = eppGroup
+		}
+		cfg.Assignment[c] = innerapi.AssignmentEntry{Group: group}
 	}
 	return cfg
 }
@@ -277,7 +284,7 @@ func WriteEppDataConfigFile(t fatalT, dir string, cfg innerapi.EppDataConfig) {
 }
 
 // WriteEppPoolFile writes epp_pool.json containing the given instance ids
-// (reference-only for epp).
+// (reference-only for epp; epp matches assignment by group name).
 func WriteEppPoolFile(t fatalT, dir string, ids ...string) {
 	t.Helper()
 	insts := make([]PoolInstance, 0, len(ids))

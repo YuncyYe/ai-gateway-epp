@@ -24,7 +24,7 @@
 
 | # | 操作 | 预期 |
 |---|---|---|
-| 1 | `StartProcess` 直接拉起 epp：`-api-addr <mock>`、`-instance-id epp-sc14-tc03`、`-grpc-tls-cert <certFile>`（**故意不传 key**），grpc/health/metrics 端口均取 `FindFreePort`，`-bind-address 127.0.0.1`；goroutine 中 `Cmd.Wait()` 并记录启动耗时 | 进程非零退出，耗时在秒级（远低于 15s 超时上限） |
+| 1 | `StartProcess` 直接拉起 epp：`-api-addr <mock>`、`-epp-group epp-sc14-tc03`、`-grpc-tls-cert <certFile>`（**故意不传 key**），grpc/health/metrics 端口均取 `FindFreePort`，`-bind-address 127.0.0.1`；goroutine 中 `Cmd.Wait()` 并记录启动耗时 | 进程非零退出，耗时在秒级（远低于 15s 超时上限） |
 | 2 | 调用 `proc.Stop(t)` 关闭日志句柄（进程已退出，Kill/Wait 为空操作；保证 Windows 下 t.TempDir 可清理日志文件） | 无报错 |
 | 3 | 读取 epp 日志文件全文 | 日志包含 `grpc-tls-cert and grpc-tls-key must be set together` |
 

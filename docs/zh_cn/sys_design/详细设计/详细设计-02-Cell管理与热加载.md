@@ -7,20 +7,13 @@ package cell
 
 type Key string // = cluster 名
 
-type Role int
-const (
-    RoleNone Role = iota
-    RoleStandby              // 热数据冷准入
-    RolePrimary              // 服务态
-)
-
 // Cell 数据面常驻；政策面经指针热切换。
+// 无角色概念：分配命中（cluster 的组 == 本实例组）即持有并服务该 cell。
 type Cell struct {
     Key    Key
     ds     datastore.Datastore            // llm-d 引擎，常驻
     epf    datalayer.EndpointFactory      // 采集 goroutine 宿主
     engine atomic.Pointer[Engine]         // 政策面
-    role   atomic.Int32                   // Role
     ready  chan struct{}                 // 首同步完成关闭（health 聚合用）
     drain  *drainState                   // 进行中的 drain（引擎或 Cell 级）
 }
@@ -44,21 +37,19 @@ type Manager struct {
 }
 
 func (m *Manager) Get(key Key) (*Cell, bool)
-func (m *Manager) Ensure(key Key, role Role) (*Cell, error)   // 幂等创建/角色调整
-func (m *Manager) Demote(key Key)                              // 主→备（drain 引擎，保留数据面）
-func (m *Manager) Promote(key Key)                             // 备→主（开闸）
-func (m *Manager) Drop(key Key)                                // 无分配：drain → 释放数据面
+func (m *Manager) Ensure(key Key) (*Cell, error)               // 幂等创建（分配命中）
+func (m *Manager) Drop(key Key)                                // 未命中：drain → 释放数据面
 func (m *Manager) SwapEngine(key Key, eng *Engine)             // 热加载切换
 ```
 
-## 2. 角色转换矩阵
+## 2. 分配命中语义（取代原角色转换矩阵）
 
-| 旧角色 \ 新角色 | 主 | 备 | 无分配 |
-|---|---|---|---|
-| 主 | 不变 | 停止准入（drain），保留数据 | drain 后销毁 |
-| 备 | 开闸即服务 | 不变 | 销毁 |
+| 旧 \ 新 | 命中（cluster 分配的组 == 本实例组） | 未命中 |
+|---|---|---|
+| 持有 cell | Ensure 幂等不变 | Drop（drain → 释放数据面） |
+| 未持有 | Ensure 新建 cell | 不变 |
 
-`Demote` 与 `Drop` 的区别：Demote 保留数据面（该实例通常正是该 cluster 的新备）；Drop 连数据面一起释放。
+原 `Role`/`RoleStandby`/`RolePrimary`、`Demote`/`Promote` 已随单实例化删除（`cell/role.go` 移除）：分配匹配只有"归我 / 不归我"（`resolveAssignmentEntry(self, e) (mine bool)`），无角色转换。
 
 ## 3. 状态机
 
@@ -117,4 +108,4 @@ compileEngine 内部（复用 llm-d loader，函数化自 `cmd/epp/runner` 的 p
 | drain goroutine | DrainScheduler 池（上限 N） | 独占旧 Engine，直到排空 |
 | 采集 goroutine | 每端点 1（llm-d collector 托管于 cell.ds 生命周期） | 随 Cell 数据面生灭 |
 
-纪律：Cell 的 `engine` 指针是唯一的跨 goroutine 可变点；`role/state` 用 atomic；Cell 集合用 sync.Map；端点/队列状态留在 llm-d 引擎内部（其 actor 模型单写者假设在 Cell 内成立——**每 Cell 独立 FC，绝不跨 Cell 共享流控组件**）。
+纪律：Cell 的 `engine` 指针是唯一的跨 goroutine 可变点；`state` 用 atomic；Cell 集合用 sync.Map；端点/队列状态留在 llm-d 引擎内部（其 actor 模型单写者假设在 Cell 内成立——**每 Cell 独立 FC，绝不跨 Cell 共享流控组件**）。

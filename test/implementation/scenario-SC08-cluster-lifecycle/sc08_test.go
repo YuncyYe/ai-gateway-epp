@@ -55,7 +55,7 @@ func TestTC01_NewClusterAdopted(t *testing.T) {
 		}
 		return common.BackendMap(bs...)
 	}
-	e.API.SetAssignment(map[string]string{"cluster-a": "primary", "cluster-b": "primary"})
+	e.API.SetAssignment(map[string]string{"cluster-a": "", "cluster-b": ""})
 	e.API.SetEppConfig(map[string]json.RawMessage{
 		"cluster-a": common.EppConfig("cluster-a", false),
 		"cluster-b": common.EppConfig("cluster-b", false),

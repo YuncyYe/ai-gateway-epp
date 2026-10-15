@@ -21,8 +21,19 @@ test/integration/   fake InnerAPI 端到端测试
 ## 构建与测试
 
 ```
-make build    # 注入 VERSION 文件中的版本号与 git commit 后构建 ./cmd/epp
+make build     # 构建到 output/bin/epp（注入 VERSION 与 git commit），并同步 output/conf
+make release   # 交叉编译 amd64/arm64 并打包 dist/epp_<version>_linux_<arch>.tar.gz（包内 bin/epp + conf/）
+make docker    # 镜像内多阶段构建本地镜像（ai-gateway-epp:v<version> / :latest）
+make clean     # 清理 output/ 与 dist/
 go test ./...
+```
+
+产物布局（`make build`）：
+
+```
+output/
+├── bin/epp        # 可执行文件
+└── conf/          # 运行配置（由仓库 conf/ 拷贝；本地模式 --local-config-dir ./output/conf）
 ```
 
 也可以 `go build ./...`，但直接构建出的二进制不含版本信息；`epp -v` 查看版本，`epp -V` 额外查看 go 版本与 git commit。
@@ -32,12 +43,18 @@ go.mod 通过 `replace` 指向本地 llm-d-router 工作区；需要 go1.26+。
 ## 运行
 
 ```
-epp -api-addr http://api-server:8181/inner-api/v1 \
-    -instance-id epp-a \
+# 生产：配置来自 ai-gateway-api InnerAPI
+./output/bin/epp -epp-group epp-a \
+    -api-addr http://api-server:8181/inner-api/v1 \
     -grpc-port 9002 -health-port 9003 -metrics-port 9090
+
+# 本地调试：读取本地配置目录（跳过 InnerAPI）
+./output/bin/epp -epp-group epp-local -local-config-dir ./output/conf/epp_data_conf
 ```
 
-环境变量：`AI_GATEWAY_API_TOKEN`（InnerAPI 鉴权）、`AI_GATEWAY_EPP_INSTANCE_ID`、`NAMESPACE`（endpoint pool 标签）。
+`-epp-group` 是实例身份（assignment 自匹配用，须与 `/epp-pool` 组名一致）；**必填，无缺省值**——未设置时进程拒绝启动（fail-fast），避免实例静默不服务。
+
+环境变量：`AI_GATEWAY_API_TOKEN`（InnerAPI 鉴权）、`AI_GATEWAY_EPP_GROUP`（组名）、`NAMESPACE`（endpoint pool 标签）。
 
 ## 设计文档
 

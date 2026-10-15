@@ -24,9 +24,15 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/datastore"
 )
 
+// Key identifies a Cell; it equals the cluster name carried in the
+// inference-pool ext-proc metadata and the cluster_table config key.
+type Key string
+
 // Cell is the unit of per-cluster lifecycle: the data plane (datastore,
 // metrics collection) is resident for the Cell's lifetime; the policy plane
-// (Engine) is hot-swapped by atomically replacing a pointer.
+// (Engine) is hot-swapped by atomically replacing a pointer. A held cell
+// always serves — assignment resolution is binary (mine or not), there is no
+// role state machine.
 type Cell struct {
 	Key Key
 
@@ -37,7 +43,6 @@ type Cell struct {
 	cancel context.CancelFunc
 
 	engine atomic.Pointer[Engine]
-	role   atomic.Int32
 	state  atomic.Int32
 
 	currentHash    atomic.Value // string; sha256 of the applied raw config
@@ -54,17 +59,11 @@ func (c *Cell) Runtime() *datalayer.Runtime    { return c.rt }
 // Engine returns the current engine; nil before the first successful compile.
 func (c *Cell) Engine() *Engine { return c.engine.Load() }
 
-func (c *Cell) Role() Role   { return Role(c.role.Load()) }
 func (c *Cell) State() State { return State(c.state.Load()) }
-
-func (c *Cell) setRole(r Role) {
-	c.role.Store(int32(r))
-	cellStateGauge.WithLabelValues(string(c.Key), r.String(), c.State().String()).Set(1)
-}
 
 func (c *Cell) setState(s State) {
 	c.state.Store(int32(s))
-	cellStateGauge.WithLabelValues(string(c.Key), c.Role().String(), s.String()).Set(1)
+	cellStateGauge.WithLabelValues(string(c.Key), s.String()).Set(1)
 }
 
 // Ready closes once the Cell has completed its first discovery sync and first
@@ -80,13 +79,13 @@ func (c *Cell) ReadySince() time.Time {
 	return time.Unix(0, t)
 }
 
-// markReady is idempotent; it performs the CREATING -> STANDBY transition.
+// markReady is idempotent; it performs the CREATING -> ACTIVE transition.
 func (c *Cell) markReady() {
 	c.readyOnce.Do(func() {
 		c.readyAt.Store(time.Now().UnixNano())
 		close(c.ready)
 		if c.State() == StateCreating {
-			c.setState(StateStandby)
+			c.setState(StateActive)
 		}
 	})
 }

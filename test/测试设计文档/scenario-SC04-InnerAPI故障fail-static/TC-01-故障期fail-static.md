@@ -17,7 +17,7 @@
 ## 前置条件
 
 1. harness 已构建 epp 二进制；inference-sim 二进制可用（见总体说明 §2，缺失时 `t.Skip`）。
-2. mock API 已配置 assignment 全量视图（cluster-a → 本实例 primary）、epp_config（cluster-a 最小配置）、cluster_table（1 个 sim 后端 a0）；epp 启动并就绪，已首拉成功。
+2. mock API 已配置 assignment 段（cluster-a → 本实例组）、epp_config（cluster-a 最小配置）、cluster_table（1 个 sim 后端 a0）；epp 启动并就绪，已首拉成功。
 3. 环境 ID `epp-sc04-tc01`，全部监听 `127.0.0.1` 动态端口。
 
 ## 测试步骤

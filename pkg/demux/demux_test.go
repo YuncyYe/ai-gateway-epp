@@ -54,7 +54,7 @@ func stubCompile(version string, err error) cell.CompileFunc {
 
 func TestManagerRouterRoute(t *testing.T) {
 	m := newTestManager(t, stubCompile("v", nil))
-	if _, err := m.Ensure(context.Background(), "cluster-a", cell.RolePrimary); err != nil {
+	if _, err := m.Ensure(context.Background(), "cluster-a"); err != nil {
 		t.Fatal(err)
 	}
 

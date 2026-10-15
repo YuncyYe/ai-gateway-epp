@@ -2,7 +2,7 @@
 
 ## 1. 概述
 
-ai-gateway-epp 是面向 BFE + ai-gateway-api 部署形态的推理调度服务：以 go module 方式复用 llm-d EPP 引擎（调度/流控/协议），自研组合层实现**多 cluster Cell 化、配置中心拉取与热加载、实例组主备**三大能力。需求基线见《ai-gateway-epp需求分析.md》（G1-G6），本文档是其系统设计。
+ai-gateway-epp 是面向 BFE + ai-gateway-api 部署形态的推理调度服务：以 go module 方式复用 llm-d EPP 引擎（调度/流控/协议），自研组合层实现**多 cluster Cell 化、配置中心拉取与热加载、实例组池化（单实例组）**三大能力。需求基线见《ai-gateway-epp需求分析.md》（G1-G6），本文档是其系统设计。
 
 **与上游的边界**：`github.com/llm-d/llm-d-router` 的 pkg/ 引擎只读引用，不 import 其 cmd/；插件注册在新仓库组合根重建（`cmd/epp/plugins.go`）。
 
@@ -26,7 +26,7 @@ ai-gateway-epp 是面向 BFE + ai-gateway-api 部署形态的推理调度服务�
    └─────────┘
 ```
 
-EPP 实例池由 ai-gateway-api OpenAPI `/epp-pool` 静态配置（实例组 + 实例列表），实例 id = StatefulSet pod hostname（`-instance-id` 缺省值，同组副本同参数启动）。
+EPP 实例池由 ai-gateway-api OpenAPI `/epp-pool` 静态配置（实例组 + 实例列表），实例身份 = 组名（`-epp-group` 必填，无缺省值，须与 `/epp-pool` 组名一致；未设置则启动失败）。
 
 **EPP 进程内部结构**（单实例）：
 
@@ -39,13 +39,13 @@ EPP 实例池由 ai-gateway-api OpenAPI `/epp-pool` 静态配置（实例组 + �
 │ CellManager：map[CellKey]*Cell  生命周期=创建/就绪/drain/销毁    │
 │   Cell = { 数据面: datastore + 采集 goroutine（常驻）            │
 │            政策面: Engine 指针（可热更）                        │
-│            角色: primary(服务态) / standby(热数据冷准入) }        │
+│            （无角色：分配命中即服务） }                          │
 │                                                                │
 │ Poller ×2（共享 innerapi client）：                              │
 │   ClusterDiscovery → cluster_table → 全量 diff → 各 Cell 端点    │
 │   EppDataWatcher   → epp_data/config → epp_config 段 per-cell    │
-│                      引擎编译切换；assignment 段全量视图经         │
-│                      本实例 id 自匹配 → 角色变更驱动 Cell         │
+│                      引擎编译切换；assignment 段（cluster→group） │
+│                      经本实例组名自匹配 → 命中/未命中驱动 Cell    │
 │                                                                │
 │ 常驻：跨副本同步（可选）、/metrics + pprof、gRPC health          │
 └────────────────────────────────────────────────────────────────┘
@@ -69,7 +69,7 @@ EPP 实例池由 ai-gateway-api OpenAPI `/epp-pool` 静态配置（实例组 + �
 | 参数 | 环境变量 | 说明 |
 |---|---|---|
 | `--api-addr` / `--api-token` | `AI_GATEWAY_API_ADDR` / `AI_GATEWAY_API_TOKEN` | InnerAPI 地址与 Token（本地文件模式下不使用） |
-| `--instance-id` | `AI_GATEWAY_EPP_INSTANCE_ID` | 实例身份，缺省 hostname；用于 assignment 自匹配 |
+| `--epp-group` | `AI_GATEWAY_EPP_GROUP` | **实例身份**（assignment 自匹配）；须与 `/epp-pool` 组名一致。**必填、无缺省值**：未设置则启动失败（fail-fast） |
 | `--poll-interval` / `--poll-timeout` | — | 轮询间隔（默认 5s）与单次拉取超时（默认 3s） |
 | `--local-config-dir` | `AI_GATEWAY_EPP_LOCAL_CONFIG_DIR` | 本地配置目录，非空即本地文件模式（§3.7） |
 | `--log-level` | `AI_GATEWAY_EPP_LOG_LEVEL` | 日志级别 `info`/`debug`/`trace`，映射 verbosity 0/2/5 |
@@ -85,12 +85,12 @@ type CellKey string // = cluster 名
 type Cell struct {
     ds      datastore.Datastore          // 数据面，常驻
     engine  atomic.Pointer[Engine]       // 政策面，热切换
-    role    atomic.Value[Role]           // primary / standby
+    // 无角色字段：分配命中即持有 cell（cell.Role 已随单实例化删除）
     draining atomic.Bool
 }
 ```
 
-- **创建**：EppDataWatcher 解析 assignment 全量视图、本实例获得新角色 → new datastore + discovery notifier 接线 → 等 ClusterDiscovery 首同步与 epp_config 首编译 → Ready
+- **创建**：EppDataWatcher 解析 assignment（cluster→group）、本实例组名命中 → new datastore + discovery notifier 接线 → 等 ClusterDiscovery 首同步与 epp_config 首编译 → Ready
 - **角色转换矩阵**（需求文档 §3.4.1）：主→备=停止准入（drain）保留数据；备→主=开闸即服务；无分配=drain 后销毁
 - **drain 语义**：旧 Engine 的流控只出不进，排空条件=队列空且 in-flight 归零，超时强杀；饱和度估计值传给新 Engine 防切换瞬间超发；`DeleteFlowControlFlowSeries` 清理指标
 
@@ -108,11 +108,11 @@ type Cell struct {
 | Poller | 数据源 | 消费动作 |
 |---|---|---|
 | ClusterDiscovery | cluster_table | 解析全量 `Config[cluster]`，per-cluster diff（增/改/删实例），按 cluster 名分发到各 Cell 的 datastore（EndpointDiscovery notifier 语义：单 goroutine 顺序 Upsert/Delete） |
-| EppDataWatcher | epp_data/config | 单 topic 单 version 快照含两段：**epp_config 段**（`map[cluster]EndpointPickerConfig`，api 已从简化用户形态编译）取本实例有角色的 cluster 做 per-cell 编译（复用 loader 严格解码/DAG 实例化/层序校验）→ 校验通过原子切换，失败该 cell 保留旧引擎；**assignment 段**（全量视图 `map[cluster]{primary, standby}`，所有实例相同）以本实例 id 逐 cluster 自匹配角色 → 驱动 Cell 创建/角色转换/销毁 |
+| EppDataWatcher | epp_data/config | 单 topic 单 version 快照含两段：**epp_config 段**（`map[cluster]EndpointPickerConfig`，api 已从简化用户形态编译）取本实例命中的 cluster 做 per-cell 编译（复用 loader 严格解码/DAG 实例化/层序校验）→ 校验通过原子切换，失败该 cell 保留旧引擎；**assignment 段**（`map[cluster]{group}`，所有实例相同）以本实例组名（`-epp-group`）逐 cluster 自匹配（`resolveAssignmentEntry(self, e) (mine bool)`，无角色）→ 驱动 Cell 创建/销毁 |
 
 数据源抽象：`Source[T]` 接口（`Fetch(ctx, version) → (changed, newVersion, data, err)`）将"取数"与"消费"解耦，`ClusterDiscovery`/`EppDataWatcher` 自身既是 `Source` 又提供 `Handle`。本地文件模式下（§3.7）仅替换 `Source`，两个 `Handle` 与轮询框架、下游 Cell/Engine 链路完全复用。
 
-一致性规则：Cell 就绪需**双段齐备**（assignment 有本实例角色 + epp_config/discovery 数据到达）；只有 epp_config 无 assignment 条目 → 跳过 + 告警（需求 §6 风险 5）。EPP **无上报义务**（无 register/心跳/就绪上报）：failover 由 BFE 侧 EPPAddr 连接滞回驱动，实例池由 OpenAPI `/epp-pool` 静态配置。
+一致性规则：Cell 就绪需**双段齐备**（assignment 命中本实例组 + epp_config/discovery 数据到达）；只有 epp_config 无 assignment 条目 → 跳过 + 告警（需求 §6 风险 5）。EPP **无上报义务**（无 register/心跳/就绪上报）：failover 由 BFE 侧 EPPAddr 连接滞回驱动，实例池由 OpenAPI `/epp-pool` 静态配置。
 
 ### 3.5 cluster-table-discovery 插件
 
@@ -141,7 +141,7 @@ EppDataWatcher 发现 epp_config 变化
   - `poller.NewLocalClusterTableSource(dir, "cluster_table.json")`：读 `ClusterTableConfig` 原始格式，经 `ConvertClusterTableToEndpoints` 转为 `map[cluster][]EndpointMetadata`（`Weight=0` 摘除）；
   - `poller.NewLocalFileSource[innerapi.EppDataConfig](dir, "epp_data_config.json")`：通用 JSON 文件源。
   - `ClusterDiscovery`/`EppDataWatcher` 仍以 `nil` client 创建，仅提供 `Handle`；轮询框架与下游链路零改动。
-- **文件格式**：直接对应 InnerAPI 响应的 `Data.Config` 层（**跳过 envelope**），即 `epp_data_config.json` = `{epp_config, assignment}`、`cluster_table.json` = `map[cluster]map[sub][]BackendConf`；目录下第三份 `epp_pool.json`（实例池定义）EPP **不消费**，仅调试参考，其 `id` 应与 assignment 中实例 id 一致。完整清单与示例见《EPP配置定义说明-epp_config.md》§1.2。
+- **文件格式**：直接对应 InnerAPI 响应的 `Data.Config` 层（**跳过 envelope**），即 `epp_data_config.json` = `{epp_config, assignment}`、`cluster_table.json` = `map[cluster]map[sub][]BackendConf`；目录下第三份 `epp_pool.json`（实例池定义）EPP **不消费**，仅调试参考，其组名/实例 id 应与 assignment 中的 `group` 一致。完整清单与示例见《EPP配置定义说明-epp_config.md》§1.2。
 - **生效语义**：本地文件无 version，每次轮询（`--poll-interval`，默认 5s）重读并返回 `changed=true`，故修改文件在下一轮生效（无需重启）；**无 inotify 文件监听、无 HTTP reload 入口**；读/解析失败 → fail-static（退避重试、沿用上一份成功配置）。
 - **日志**：`--log-level`（`AI_GATEWAY_EPP_LOG_LEVEL`）控制 verbosity——`info`=0（仅 EPP V(0)）、`debug`=2（含 llm-d-router DEFAULT）、`trace`=5（含 TRACE），便于本地排查。
 - **非目标**：不改变 InnerAPI 模式任何行为；文件监听/HTTP reload 未纳入本期；生产仍以 InnerAPI 热加载为准。
@@ -163,19 +163,19 @@ BFE ── ResponseHeaders/Body(流式) ──▶ EPP（token 计量回收，派
 
 见 §3.6。epp_config 与 assignment 同 version 快照，角色与配置不会错配；全程该 cluster 请求无失败（新请求走新引擎指针），其他 cluster 完全不受影响。
 
-### 4.3 主备 failover
+### 4.3 实例故障与 failover
 
 ```
 kill epp-A（cluster-x 的主）
   → BFE 健康检查（gRPC health，滞回：冷却 30~60s + 连续 N 次通过）
   → BFE 切 epp-B；未派发请求重试到 B，已派发不盲目重试（FR-H3）
   → epp-B 上 Cell-x 备→主：开闸即服务（热数据冷准入，FR-H5）
-ai-gateway-api（可选第二期主动检测）→ assignment 翻转 → A 恢复后按矩阵降级为备
+ai-gateway-api（可选第二期主动检测）→ assignment 重分配 → A 恢复后对应 cell 重建（Ensure 幂等）
 ```
 
 ### 4.4 扩容（加组）
 
-新组 {C,D} 启动（StatefulSet，同参数）→ 部署流程 PATCH `/epp-pool` 登记 → assignment 下发 → C/D 建 Cell（先备角色同步数据）→ 分配器按贪心 + 确定性 tie-break 翻转部分 cluster 主角色 → A/B 对应 Cell 主→备 drain 保留数据 → BFE 经 server_data_conf 拿到新 EPPAddr 顺序。**已有实例零接触**（NFR-5）。
+新组 {C} 启动（StatefulSet）→ 部署流程 PATCH `/epp-pool` 登记（每组恰 1 实例）→ assignment 下发 → C 建 Cell（Ensure）→ 分配器按贪心 + 确定性 tie-break 将部分 cluster 改分配到新组 → A 对应 cell 未命中即 Drop → BFE 经 server_data_conf 拿到新 EPPAddr。**已有实例零接触**（NFR-5）。
 
 ## 5. 配置模型（两个拉取接口）
 
@@ -183,7 +183,7 @@ ai-gateway-api（可选第二期主动检测）→ assignment 翻转 → A 恢�
 |---|---|---|---|
 | cluster_table（已有） | EPP | 全量实例列表 | ai-gateway-api InnerAPI 既有定义 |
 | server_data_conf.GslbBasic.EPPAddr（已有字段补语义） | BFE | 有序 `[主, 备]` 地址（`[0]`=主、`[1]`=备；BFE 按序消费 + 滞回，全部不可用回退本地均衡） | —（BFE 侧契约，EPP 不消费） |
-| epp_data/config（新增） | EPP | 两段：`epp_config` = `map[cluster]EndpointPickerConfig`（api 编译后形态）；`assignment` = `map[cluster]{primary, standby}` 全量视图 | 《EPP配置定义说明-epp_config.md》（`docs/zh_cn/configuration/`） |
+| epp_data/config（新增） | EPP | 两段：`epp_config` = `map[cluster]EndpointPickerConfig`（api 编译后形态）；`assignment` = `map[cluster]{group}`（cluster→分配的实例组） | 《EPP配置定义说明-epp_config.md》（`docs/zh_cn/configuration/`） |
 
 EPP 实例池（实例组 + 实例列表）由 OpenAPI `/epp-pool` 静态配置，不属于拉取接口。变更全部走 version 增量 + Data-null；EPP 侧 fail-static。
 
@@ -195,7 +195,7 @@ EPP 实例池（实例组 + 实例列表）由 OpenAPI `/epp-pool` 静态配置�
 |---|---|
 | ai-gateway-api 不可用 | 两 Poller 各自退避；实例/配置/分配全部沿用最后已知状态（NFR-4：30 分钟无劣化） |
 | 配置编译失败 | per-cell 隔离，旧引擎服务，指标告警（FR-C4） |
-| 本实例 id 未命中 assignment 任何角色 | 全部 cluster 跳过、无 cell 不服务；`epp_assignment_no_match` 告警（部署核对 `-instance-id` 与 `/epp-pool`） |
+| 本实例组名未命中 assignment 任何条目 | 全部 cluster 跳过、无 cell 不服务；`ai_epp_assignment_no_match` 告警（部署核对 `-epp-group` 与 `/epp-pool` 组名） |
 | BFE 未注入/错误 pool 名 | 拒绝 + 指标；灰度期 BFE 双写老链路 |
 | 主 EPP 故障 | BFE 滞回切换备；无备（测试组）降级本地均衡 |
 | 单 Cell panic | demux 层 recover，该请求失败，进程与其他 Cell 不受影响 |
@@ -203,7 +203,7 @@ EPP 实例池（实例组 + 实例列表）由 OpenAPI `/epp-pool` 静态配置�
 ## 7. 可观测性
 
 - **端口**：gRPC 业务端口（ext-proc）/ gRPC health 端口 / metrics 端口（`/metrics` + pprof，内网收敛，NFR-8）
-- **新增指标**：`engine_reloads_total{cluster,result}`、`engine_current_version{cluster}`、poller 两套件（last_sync_timestamp/failures/backoff_state）、`epp_assignment_no_match`（实例未命中角色）、`epp_assignment_peer`（同组 peer 观测）、Cell 角色活跃态（双活跃告警数据源 FR-H4）
+- **新增指标**：`engine_reloads_total{cluster,result}`、`engine_current_version{cluster}`、poller 两套件（last_sync_timestamp/failures/backoff_state）、`ai_epp_assignment_no_match`（实例组名未命中任何分配）；cell 活跃态指标（双活跃告警数据源 FR-H4）
 - **复用**：llm-d 全部既有指标（调度/流控/端点/请求），不改引擎埋点（FR-O3）
 
 ## 8. 性能与扩展

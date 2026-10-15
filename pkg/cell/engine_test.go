@@ -153,8 +153,8 @@ func TestEngineStartNoDiscovery(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("cell not ready with no discovery plugins")
 	}
-	if c.State() != StateStandby {
-		t.Errorf("State() = %v, want StateStandby", c.State())
+	if c.State() != StateActive {
+		t.Errorf("State() = %v, want StateActive", c.State())
 	}
 }
 
@@ -185,8 +185,8 @@ func TestEngineStartWaitsForDiscovery(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("cell not ready after discovery sync")
 	}
-	if c.State() != StateStandby {
-		t.Errorf("State() = %v, want StateStandby", c.State())
+	if c.State() != StateActive {
+		t.Errorf("State() = %v, want StateActive", c.State())
 	}
 }
 

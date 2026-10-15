@@ -33,13 +33,13 @@ import (
 const chatBody = `{"model":"sim-model","messages":[{"role":"user","content":"hello from sc14"}],"max_tokens":8}`
 
 func installCluster(api *common.MockAPI, instance, simAddr string) {
-	api.SetDefaultInstance(instance)
+	api.SetDefaultGroup(instance)
 	api.SetClusterTable(map[string]map[string][]map[string]any{
 		"cluster-a": {"sub-1": common.BackendMap(common.Backend{
 			Name: "cluster-a-a0", Addr: "127.0.0.1", Port: common.PortOf(simAddr), Weight: 50,
 		})},
 	})
-	api.SetAssignment(map[string]string{"cluster-a": "primary"})
+	api.SetAssignment(map[string]string{"cluster-a": ""})
 	api.SetEppConfig(map[string]json.RawMessage{"cluster-a": common.EppConfig("cluster-a", false)})
 }
 
@@ -152,7 +152,7 @@ func TestTC03_TLSConfigFailFast(t *testing.T) {
 	proc := common.StartProcess(t, logDir, "epp",
 		common.EppBinary(t),
 		"-api-addr", api.Addr(),
-		"-instance-id", "epp-sc14-tc03",
+		"-epp-group", "epp-sc14-tc03",
 		"-grpc-tls-cert", certFile, // key deliberately missing
 		"-grpc-port", fmt.Sprint(common.FindFreePort(t)),
 		"-health-port", fmt.Sprint(common.FindFreePort(t)),

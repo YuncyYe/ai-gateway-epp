@@ -21,6 +21,8 @@
 package sc15
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -48,16 +50,24 @@ func pick(t *testing.T, e *common.LocalEnv, pool string) (string, error) {
 	return common.PickEndpoint(e.EPP.GRPCAddr, pool, "/v1/chat/completions", []byte(chatBody), 10*time.Second)
 }
 
-// assertLoaded checks the core "config loaded" signals for a primary cluster:
-// compiled engine, primary cell, assignment matched, both pollers synced.
+// assertLoaded checks the core "config loaded" signals for an assigned cluster
+// (compiled engine, active cell, assignment matched, both pollers synced) on a
+// LocalEnv.
 func assertLoaded(t *testing.T, e *common.LocalEnv, cluster string) {
 	t.Helper()
-	text := common.FetchMetrics(t, e.EPP.MetricsAddr)
+	assertLoadedMetrics(t, e.EPP.MetricsAddr, cluster)
+}
+
+// assertLoadedMetrics is the metrics-address based core of assertLoaded, so
+// cases that drive epp through a bare EppEnv (no LocalEnv wrapper) can reuse it.
+func assertLoadedMetrics(t *testing.T, metricsAddr, cluster string) {
+	t.Helper()
+	text := common.FetchMetrics(t, metricsAddr)
 	if v := common.EngineVersion(text, cluster); v == "" {
 		t.Fatalf("%s has no compiled engine (epp_data_config not applied)", cluster)
 	}
-	if v := common.MetricValue(text, fmt.Sprintf(`ai_epp_cell_state{cluster=%q,role="primary",state="primary"}`, cluster)); v != 1 {
-		t.Fatalf("%s cell_state primary/primary = %v, want 1", cluster, v)
+	if v := common.MetricValue(text, fmt.Sprintf(`ai_epp_cell_state{cluster=%q,state="active"}`, cluster)); v != 1 {
+		t.Fatalf("%s cell_state active = %v, want 1", cluster, v)
 	}
 	if v := common.MetricValue(text, `ai_epp_assignment_no_match`); v != 0 {
 		t.Fatalf("assignment_no_match = %v, want 0", v)
@@ -88,7 +98,7 @@ func configV2(cluster string) json.RawMessage {
 }
 
 // TestTC01_LocalConfigStartup: --local-config-dir alone loads both consumed
-// files: readiness SERVING, engine compiled, primary cell, assignment matched,
+// files: readiness SERVING, engine compiled, active cell, assignment matched,
 // both pollers synced, and the cluster_table endpoint is picked by ext-proc.
 func TestTC01_LocalConfigStartup(t *testing.T) {
 	e := common.NewLocalEnv(t, "epp-sc15-tc01", map[string][]string{
@@ -150,30 +160,42 @@ func TestTC03_MultiCluster(t *testing.T) {
 	}
 }
 
-// TestTC04_StandbyRole: a local assignment that holds this instance as standby
-// builds a hot-standby cell (engine still compiled, readiness SERVING) but
-// ext-proc refuses to serve the cluster.
-func TestTC04_StandbyRole(t *testing.T) {
-	e := common.NewLocalEnv(t, "epp-sc15-tc04", map[string][]string{
-		"cluster-a": {"a0"},
-	}, common.WithLocalRoles(map[string]string{"cluster-a": "standby"}))
-	defer e.Close(t)
+// TestTC04_UnassignedCluster: a local assignment that assigns the cluster to
+// another group builds no cell; ext-proc refuses to serve the cluster and
+// the no-match gauge fires.
+func TestTC04_UnassignedCluster(t *testing.T) {
+	// Built manually (not via NewLocalEnv) because an instance whose group
+	// matches no assignment holds no cells and therefore stays NOT_SERVING:
+	// only liveness can be awaited here.
+	logDir := t.TempDir()
+	dir := t.TempDir()
+	addr := reservedAddr(t)
+	common.WriteClusterTableFile(t, dir, common.LocalBackendTable(map[string][]string{"cluster-a": {addr}}))
+	common.WriteEppDataConfigFile(t, dir, common.EppDataConfigFor(
+		"epp-sc15-tc04", []string{"cluster-a"}, map[string]string{"cluster-a": "other-group"}, common.LocalEppConfig))
+	common.WriteEppPoolFile(t, dir, "epp-sc15-tc04")
 
-	text := common.FetchMetrics(t, e.EPP.MetricsAddr)
-	if v := common.EngineVersion(text, "cluster-a"); v == "" {
-		t.Fatal("standby cell has no compiled engine (data plane should stay hot)")
-	}
-	if v := common.MetricValue(text, `ai_epp_cell_state{cluster="cluster-a",role="standby",state="standby"}`); v != 1 {
-		t.Fatalf("cell_state standby/standby = %v, want 1", v)
-	}
-	if v := common.MetricValue(text, `ai_epp_assignment_no_match`); v != 0 {
-		t.Fatalf("assignment_no_match = %v, want 0 (standby is a self-match)", v)
-	}
+	env := common.StartLocalEPP(t, logDir, dir, "epp-sc15-tc04", common.LocalEPPOptions{})
+	defer env.Proc.Stop(t)
+	env.WaitHealth(t, "liveness", 30*time.Second)
 
-	if _, err := pick(t, e, "cluster-a"); err == nil || !strings.Contains(err.Error(), "not serving") {
-		t.Fatalf("standby pick err = %v, want cell-not-serving", err)
+	text := common.FetchMetrics(t, env.MetricsAddr)
+	if v := common.EngineVersion(text, "cluster-a"); v != "" {
+		t.Fatalf("unassigned cluster has a compiled engine (%q), want none", v)
 	}
-	e.EPP.WaitHealth(t, "liveness", 5*time.Second)
+	if v := common.MetricValue(text, `ai_epp_cell_state{cluster="cluster-a",state="active"}`); v != 0 {
+		t.Fatalf("cell_state active = %v, want 0", v)
+	}
+	if v := common.MetricValue(text, `ai_epp_assignment_no_match`); v != 1 {
+		t.Fatalf("assignment_no_match = %v, want 1 (group matches no assignment)", v)
+	}
+	// No cells: readiness stays NOT_SERVING.
+	if st, err := common.CheckHealth(env.HealthAddr, ""); err != nil || st != healthpb.HealthCheckResponse_NOT_SERVING {
+		t.Fatalf("readiness = %v err=%v, want NOT_SERVING", st, err)
+	}
+	if _, err := common.PickEndpoint(env.GRPCAddr, "cluster-a", "/v1/chat/completions", []byte(chatBody), 3*time.Second); err == nil {
+		t.Fatal("unassigned cluster pick succeeded, want rejection")
+	}
 }
 
 // TestTC05_PollReload: LocalFileSource reports changed=true on every fetch, so
@@ -193,7 +215,7 @@ func TestTC05_PollReload(t *testing.T) {
 
 	// Edit epp_data_config.json: rename a plugin -> content hash changes.
 	common.WriteEppDataConfigFile(t, e.ConfigDir,
-		common.EppDataConfigFor(e.InstanceID, []string{"cluster-a"}, nil, configV2))
+		common.EppDataConfigFor(e.Group, []string{"cluster-a"}, nil, configV2))
 	common.WaitFor(t, 20*time.Second, "engine version changes after file edit", func() bool {
 		v := common.EngineVersion(common.FetchMetrics(t, e.EPP.MetricsAddr), "cluster-a")
 		return v != "" && v != v1
@@ -240,7 +262,7 @@ func TestTC06_MissingEppData(t *testing.T) {
 	if v := common.EngineVersion(text, "cluster-a"); v != "" {
 		t.Fatalf("engine compiled (%q) despite missing epp_data_config.json", v)
 	}
-	if v := common.MetricValue(text, `ai_epp_cell_state{cluster="cluster-a",role="primary",state="primary"}`); v != 0 {
+	if v := common.MetricValue(text, `ai_epp_cell_state{cluster="cluster-a",state="active"}`); v != 0 {
 		t.Fatalf("cell created despite missing epp_data_config.json (gauge=%v)", v)
 	}
 
@@ -284,7 +306,7 @@ func TestTC07_BadJSON(t *testing.T) {
 	if v := common.EngineVersion(text, "cluster-a"); v != "" {
 		t.Fatalf("engine compiled (%q) despite corrupt epp_data_config.json", v)
 	}
-	if v := common.MetricValue(text, `ai_epp_cell_state{cluster="cluster-a",role="primary",state="primary"}`); v != 0 {
+	if v := common.MetricValue(text, `ai_epp_cell_state{cluster="cluster-a",state="active"}`); v != 0 {
 		t.Fatalf("cell created despite corrupt epp_data_config.json (gauge=%v)", v)
 	}
 
@@ -324,6 +346,85 @@ func TestTC08_NoInnerAPITraffic(t *testing.T) {
 	}
 	if n := e.API.ReportCount(); n != 0 {
 		t.Fatalf("assignment/report posts = %d, want 0", n)
+	}
+}
+
+// preplacedConfigDir returns the checked-in (repo-tracked) local config
+// directory: cluster-a assigned to group epp-sc15-tc10, endpoint
+// 127.0.0.1:18981 (cluster_table.json), and a full endpoint-picker config
+// (featureGates flowControl + utilization/session/kv/queue/prefix scorers +
+// flowControl block) in epp_data_config.json. See testdata/epp_data_conf/README.md.
+func preplacedConfigDir(t *testing.T) string {
+	t.Helper()
+	return filepath.Join(common.RepoRoot(t), "test", "implementation",
+		"scenario-SC15-local-config-file", "testdata", "epp_data_conf")
+}
+
+// expectedEngineVersion returns the engine version epp must report for the
+// preplaced config: sha256 of the raw JSON bytes of epp_config["<cluster>"]
+// exactly as written in epp_data_config.json (cell.HashConfig hashes the raw
+// bytes). Matching it proves the running engine was compiled from this file.
+func expectedEngineVersion(t *testing.T, configDir, cluster string) string {
+	t.Helper()
+	raw, err := os.ReadFile(filepath.Join(configDir, "epp_data_config.json"))
+	if err != nil {
+		t.Fatalf("read preplaced epp_data_config.json: %v", err)
+	}
+	var cfg struct {
+		EppConfig map[string]json.RawMessage `json:"epp_config"`
+	}
+	if err := json.Unmarshal(raw, &cfg); err != nil {
+		t.Fatalf("decode preplaced epp_data_config.json: %v", err)
+	}
+	clusterCfg, ok := cfg.EppConfig[cluster]
+	if !ok {
+		t.Fatalf("preplaced config has no epp_config[%q]", cluster)
+	}
+	sum := sha256.Sum256(clusterCfg)
+	return hex.EncodeToString(sum[:])
+}
+
+// TestTC10_PreplacedConfigDir: --local-config-dir pointing at the checked-in
+// config directory loads the files verbatim (no test-generated temp config):
+// readiness SERVING, engine compiled from exactly those bytes, active cell,
+// assignment matched, both pollers synced, and ext-proc picks the endpoint
+// declared in cluster_table.json. No InnerAPI is started, so a green run proves
+// the config came from the files on disk.
+func TestTC10_PreplacedConfigDir(t *testing.T) {
+	logDir := t.TempDir()
+	dir := preplacedConfigDir(t)
+
+	env := common.StartLocalEPP(t, logDir, dir, "epp-sc15-tc10", common.LocalEPPOptions{})
+	defer env.Proc.Stop(t)
+
+	// Readiness needs epp_data first sync + the single cell ready: an unbound
+	// backend port is fine (this scenario never dials the backend).
+	env.WaitHealth(t, "", 45*time.Second)
+
+	assertLoadedMetrics(t, env.MetricsAddr, "cluster-a")
+
+	text := common.FetchMetrics(t, env.MetricsAddr)
+
+	// The engine version is the sha256 of the raw epp_config bytes written in
+	// the preplaced file: the richest proof that the file on disk (not a
+	// default/stale config) was compiled.
+	if got, want := common.EngineVersion(text, "cluster-a"), expectedEngineVersion(t, dir, "cluster-a"); got != want {
+		t.Fatalf("engine version = %q, want sha256 of testdata epp_config (%q)", got, want)
+	}
+
+	// At least one successful compile/swap happened for the file's config.
+	if n := common.MetricValue(text, `ai_epp_engine_reloads_total{cluster="cluster-a",result="success"}`); n < 1 {
+		t.Fatalf("engine_reloads_total success = %v, want >= 1", n)
+	}
+
+	// The picked endpoint is exactly the one declared in the preplaced
+	// cluster_table.json, proving cluster_table was read from the file.
+	ep, err := common.PickEndpoint(env.GRPCAddr, "cluster-a", "/v1/chat/completions", []byte(chatBody), 10*time.Second)
+	if err != nil {
+		t.Fatalf("pick from preplaced config failed: %v", err)
+	}
+	if ep != "127.0.0.1:18981" {
+		t.Fatalf("picked endpoint = %q, want the endpoint from testdata cluster_table (127.0.0.1:18981)", ep)
 	}
 }
 

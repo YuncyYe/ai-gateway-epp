@@ -27,8 +27,8 @@ import (
 )
 
 // MockAPI is an in-process ai-gateway-api InnerAPI mock covering the two
-// endpoints ai-gateway-epp consumes (epp_data/config with the full assignment
-// view, gslb_data/cluster_table), with version increments and a failure
+// endpoints ai-gateway-epp consumes (epp_data/config with the cluster-to-group
+// assignment, gslb_data/cluster_table), with version increments and a failure
 // switch for fail-static scenarios. The retired assignment/report endpoint
 // is kept as a recorder so tests can assert nothing is posted there.
 type MockAPI struct {
@@ -37,11 +37,11 @@ type MockAPI struct {
 	mu sync.Mutex
 
 	eppConfig  map[string]json.RawMessage
-	assignment map[string]innerapi.AssignmentEntry // full view: cluster -> {primary, standby}
+	assignment map[string]innerapi.AssignmentEntry // cluster -> {group}
 	table      map[string]any                      // cluster -> subCluster -> []backend map
 	fail       bool
 
-	defaultInstance string // instance id SetAssignment builds the full view for
+	defaultGroup string // group name SetAssignment builds the view for
 
 	version int64
 
@@ -99,27 +99,25 @@ func (m *MockAPI) SetFail(v bool) {
 	m.fail = v
 }
 
-// SetDefaultInstance records the instance id SetAssignment gives roles to.
-// NewEnv sets it to the env's instance id.
-func (m *MockAPI) SetDefaultInstance(id string) {
+// SetDefaultGroup records the group name SetAssignment assigns clusters to.
+// NewEnv sets it to the env's group name.
+func (m *MockAPI) SetDefaultGroup(group string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.defaultInstance = id
+	m.defaultGroup = group
 }
 
-// SetAssignment replaces the assignment full view, giving the default
-// instance the given role per cluster ("primary" or "standby"); a standby
-// entry leaves the primary empty (single-sided view, as a misconfigured pool
-// would produce).
-func (m *MockAPI) SetAssignment(roles map[string]string) {
+// SetAssignment replaces the assignment section: every listed cluster is
+// assigned to the default group. Pass an empty map to assign nothing.
+func (m *MockAPI) SetAssignment(clusters map[string]string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.assignment = fullView(m.defaultInstance, roles)
+	m.assignment = fullView(m.defaultGroup, clusters)
 	m.version++
 }
 
-// SetAssignmentView installs a full assignment view (cluster -> {primary,
-// standby}) directly, e.g. for multi-instance groups.
+// SetAssignmentView installs an assignment section (cluster -> {group})
+// directly.
 func (m *MockAPI) SetAssignmentView(view map[string]innerapi.AssignmentEntry) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -127,23 +125,15 @@ func (m *MockAPI) SetAssignmentView(view map[string]innerapi.AssignmentEntry) {
 	m.version++
 }
 
-// fullView expands per-instance roles into the full assignment view.
-func fullView(self string, roles map[string]string) map[string]innerapi.AssignmentEntry {
-	out := make(map[string]innerapi.AssignmentEntry, len(roles))
-	for cluster, role := range roles {
-		e := innerapi.AssignmentEntry{}
-		if role == "standby" {
-			e.Standby = sp(self)
-		} else {
-			e.Primary = sp(self)
-		}
-		out[cluster] = e
+// fullView expands a cluster set into the assignment section: every listed
+// cluster is assigned to the given group.
+func fullView(group string, clusters map[string]string) map[string]innerapi.AssignmentEntry {
+	out := make(map[string]innerapi.AssignmentEntry, len(clusters))
+	for cluster := range clusters {
+		out[cluster] = innerapi.AssignmentEntry{Group: group}
 	}
 	return out
 }
-
-// sp returns a pointer to s (tiny helper for view construction).
-func sp(s string) *string { return &s }
 
 // SetEppConfig replaces the epp_config section and bumps the version.
 func (m *MockAPI) SetEppConfig(v map[string]json.RawMessage) {

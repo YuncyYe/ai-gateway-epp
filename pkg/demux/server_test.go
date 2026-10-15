@@ -140,11 +140,11 @@ func compileWithStreamer(streamer *handlers.StreamingServer) cell.CompileFunc {
 	}
 }
 
-// setupPool ensures the cell exists with the given role and applies a config
-// generation (unless raw is empty, which leaves the engine unset).
-func setupPool(t *testing.T, m *cell.Manager, key string, role cell.Role, raw string) *cell.Cell {
+// setupPool ensures the cell exists and applies a config generation (unless
+// raw is empty, which leaves the engine unset).
+func setupPool(t *testing.T, m *cell.Manager, key string, raw string) *cell.Cell {
 	t.Helper()
-	c, err := m.Ensure(context.Background(), cell.Key(key), role)
+	c, err := m.Ensure(context.Background(), cell.Key(key))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -261,7 +261,7 @@ func TestBufferedStreamContext(t *testing.T) {
 func TestProcessRequestIDPreserved(t *testing.T) {
 	streamer := handlers.NewStreamingServer(nil, nil, nil, 0)
 	m := newTestManager(t, compileWithStreamer(streamer))
-	setupPool(t, m, "pool-a", cell.RolePrimary, `{"a":1}`)
+	setupPool(t, m, "pool-a", `{"a":1}`)
 	s := NewServer(ManagerRouter{Manager: m}, "pool-a", logr.Discard())
 
 	first := headersRequest("pool-a")
@@ -282,7 +282,7 @@ func TestProcessRequestIDPreserved(t *testing.T) {
 func TestProcessRequestIDGeneratedWhenMissing(t *testing.T) {
 	streamer := handlers.NewStreamingServer(nil, nil, nil, 0)
 	m := newTestManager(t, compileWithStreamer(streamer))
-	setupPool(t, m, "pool-a", cell.RolePrimary, `{"a":1}`)
+	setupPool(t, m, "pool-a", `{"a":1}`)
 	s := NewServer(ManagerRouter{Manager: m}, "pool-a", logr.Discard())
 
 	first := headersRequest("pool-a")
@@ -342,7 +342,7 @@ func TestProcessRequestIDInLogs(t *testing.T) {
 
 	streamer := handlers.NewStreamingServer(nil, nil, nil, 0)
 	m := newTestManager(t, compileWithStreamer(streamer))
-	setupPool(t, m, "pool-a", cell.RolePrimary, `{"a":1}`)
+	setupPool(t, m, "pool-a", `{"a":1}`)
 	s := NewServer(ManagerRouter{Manager: m}, "pool-a", logger)
 
 	first := headersRequest("pool-a")
@@ -393,7 +393,7 @@ func TestProcessFirstMessageNotHeaders(t *testing.T) {
 
 func TestProcessNoPoolNoDefault(t *testing.T) {
 	m := newTestManager(t, stubCompile("v", nil))
-	setupPool(t, m, "pool-a", cell.RolePrimary, `{"a":1}`)
+	setupPool(t, m, "pool-a", `{"a":1}`)
 	s := NewServer(ManagerRouter{Manager: m}, "", logr.Discard())
 
 	err := s.Process(newFakeStream(headersRequest("")))
@@ -404,7 +404,7 @@ func TestProcessNoPoolNoDefault(t *testing.T) {
 
 func TestProcessUnknownPool(t *testing.T) {
 	m := newTestManager(t, stubCompile("v", nil))
-	setupPool(t, m, "pool-a", cell.RolePrimary, `{"a":1}`)
+	setupPool(t, m, "pool-a", `{"a":1}`)
 	s := NewServer(ManagerRouter{Manager: m}, "", logr.Discard())
 
 	// Named pool wins over the default: "ghost" must not fall back to pool-a.
@@ -416,18 +416,7 @@ func TestProcessUnknownPool(t *testing.T) {
 
 func TestProcessCellNotReady(t *testing.T) {
 	m := newTestManager(t, stubCompile("v", nil))
-	setupPool(t, m, "pool-a", cell.RolePrimary, "") // no config applied: engine unset
-	s := NewServer(ManagerRouter{Manager: m}, "pool-a", logr.Discard())
-
-	err := s.Process(newFakeStream(headersRequest("pool-a")))
-	if codeOf(err) != codes.Unavailable || status.Convert(err).Message() != ErrCellDraining.Error() {
-		t.Fatalf("code=%v err=%v", codeOf(err), err)
-	}
-}
-
-func TestProcessStandbyCell(t *testing.T) {
-	m := newTestManager(t, stubCompile("v", nil))
-	setupPool(t, m, "pool-a", cell.RoleStandby, `{"a":1}`)
+	setupPool(t, m, "pool-a", "") // no config applied: engine unset
 	s := NewServer(ManagerRouter{Manager: m}, "pool-a", logr.Discard())
 
 	err := s.Process(newFakeStream(headersRequest("pool-a")))
@@ -439,11 +428,11 @@ func TestProcessStandbyCell(t *testing.T) {
 func TestProcessDelegatesToStreamer(t *testing.T) {
 	streamer := handlers.NewStreamingServer(nil, nil, nil, 0)
 	m := newTestManager(t, compileWithStreamer(streamer))
-	setupPool(t, m, "pool-a", cell.RolePrimary, `{"a":1}`)
+	setupPool(t, m, "pool-a", `{"a":1}`)
 	s := NewServer(ManagerRouter{Manager: m}, "pool-b", logr.Discard())
 
 	// Metadata routes to pool-b even though the default points elsewhere...
-	setupPool(t, m, "pool-b", cell.RolePrimary, `{"b":1}`)
+	setupPool(t, m, "pool-b", `{"b":1}`)
 	if err := s.Process(newFakeStream(headersRequest("pool-b"))); err != nil {
 		t.Fatalf("err=%v", err)
 	}
@@ -458,7 +447,7 @@ func TestProcessPanicRecovery(t *testing.T) {
 	// Engines from stubCompile have no streamer; invoking Process on them
 	// panics, which the demux server must convert to an Internal error.
 	m := newTestManager(t, stubCompile("v", nil))
-	setupPool(t, m, "pool-a", cell.RolePrimary, `{"a":1}`)
+	setupPool(t, m, "pool-a", `{"a":1}`)
 	s := NewServer(ManagerRouter{Manager: m}, "pool-a", logr.Discard())
 
 	err := s.Process(newFakeStream(headersRequest("pool-a")))
@@ -472,7 +461,7 @@ func TestProcessPanicRecovery(t *testing.T) {
 
 func TestProcessRecvPanicRecovered(t *testing.T) {
 	m := newTestManager(t, stubCompile("v", nil))
-	setupPool(t, m, "pool-a", cell.RolePrimary, `{"a":1}`)
+	setupPool(t, m, "pool-a", `{"a":1}`)
 	s := NewServer(ManagerRouter{Manager: m}, "pool-a", logr.Discard())
 
 	stream := newFakeStream(headersRequest("pool-a"))
@@ -494,7 +483,7 @@ func TestProcessRecvPanicRecovered(t *testing.T) {
 func TestProcessConcurrentRace(t *testing.T) {
 	streamer := handlers.NewStreamingServer(nil, nil, nil, 0)
 	m := newTestManager(t, compileWithStreamer(streamer))
-	setupPool(t, m, "pool-a", cell.RolePrimary, `{"a":0}`)
+	setupPool(t, m, "pool-a", `{"a":0}`)
 	s := NewServer(ManagerRouter{Manager: m}, "pool-a", logr.Discard())
 
 	var workers sync.WaitGroup

@@ -1,0 +1,8 @@
+# 构建产物（make build / make release 生成）
+/output/
+/dist/
+/epp
+
+# 构建/调试临时文件
+*.log
+*.bak

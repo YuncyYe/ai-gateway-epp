@@ -17,15 +17,15 @@ llm-d EPP（Endpoint Picker）是成熟的推理调度引擎（调度、流控�
 
 ## 2. 目标对齐
 
-**一句话目标**：构建一个以 ai-gateway-api 为唯一配置权威、可热加载、池化主备部署的多 cluster 推理调度服务，复用 llm-d EPP 引擎，通过 ext-proc 协议为 BFE 提供选端点能力。
+**一句话目标**：构建一个以 ai-gateway-api 为唯一配置权威、可热加载、池化部署（实例组，当前单实例组）的多 cluster 推理调度服务，复用 llm-d EPP 引擎，通过 ext-proc 协议为 BFE 提供选端点能力。
 
 | # | 目标 | 成功的可验证标志 |
 |---|---|---|
 | G1 | 脱离 K8s 运行 | EPP 在无任何 K8s API 访问的环境下完整启动并服务 |
-| G2 | ai-gateway-api 为唯一配置权威 | 全部运行时配置（实例列表、调度策略、流控参数、主备分配）只从 ai-gateway-api InnerAPI 获取；修改后生效不依赖任何 K8s 资源 |
+| G2 | ai-gateway-api 为唯一配置权威 | 全部运行时配置（实例列表、调度策略、流控参数、组分配）只从 ai-gateway-api InnerAPI 获取；修改后生效不依赖任何 K8s 资源 |
 | G3 | 配置热加载 | 修改 cluster 级配置后到生效全程不重启进程、不中断该 cluster 服务 |
 | G4 | 单实例多 cluster | 一个 EPP 进程同时调度多个 cluster，新增/移除 cluster 自动生效 |
-| G5 | 池化主备 | 实例池按"每 cluster 一主一备"分配，主故障自动切换，资源池化利用 |
+| G5 | 池化部署（实例组） | 实例池按"cluster → 实例组"分配（当前每组恰 1 实例），实例故障由 BFE 回退 + api 侧修复兜底，资源池化利用 |
 | G6 | 引擎复用 | 调度/流控/协议核心直接引用 llm-d 上游模块，不复制不魔改 |
 
 ## 3. 功能需求
@@ -69,49 +69,47 @@ cluster_table 的 `Weight` 字段在 EPP 链路上**只生效为注册/摘除开
 | FR-M3 | cluster 生命周期数据驱动：随 cluster_table 与 `epp_data/config`（assignment 段）数据自动创建、就绪、drain、销毁 Cell | P0 |
 | FR-M4 | 请求路径指标携带 cluster/pool 维度标签 | P1 |
 
-### 3.4 主备池化（FR-H）
+### 3.4 实例组池化（FR-H，2026-10-14 起取代主备池化）
 
 | 编号 | 需求 | 优先级 |
 |---|---|---|
-| FR-H1 | ai-gateway-api 为每 cluster 分配所属实例组与组内主实例，经 `epp_data/config` 的 assignment 段（`map[cluster]{primary, standby}` 全量视图，所有实例返回相同内容）下发；EPP 以本实例 id 在视图中自匹配角色，只为指定 cluster 建 Cell（主=服务态，备=热数据冷准入）。**第一期采用固定 2 实例互备组**（见 §3.4.1） | P0 |
-| FR-H2 | BFE 对指定 cluster 优先请求主 EPP，失败后故障转移到同组另一实例（若配置了备）；要求 BFE failover 带滞回（冷却期 + 连续健康检查通过才回切），防抖动 | P0 |
-| FR-H3 | 主备切换不丢"已派发"请求语义：failover 重试只针对未派发请求（派发标记机制），容忍在飞请求计量丢失（TTL 自愈） | P1 |
-| FR-H4 | 脑裂（主备同时活跃）可接受不防御：按共享背压有界退化处理，但必须有"同一 cluster 双活跃"告警指标 | P1 |
-| FR-H5 | 备 Cell 热数据冷准入：failover 后无需冷启动即可服务 | P1 |
+| FR-H1 | ai-gateway-api 为每 cluster 分配**实例组**（分配粒度为组，每组当前恰好 1 实例），经 `epp_data/config` 的 assignment 段（`map[cluster]{group}`，所有实例返回相同内容）下发；EPP 以**自身组名**（`-epp-group`）在视图中自匹配（`resolveAssignmentEntry` 返回 mine bool，无角色概念），只为命中的 cluster 建 Cell。**单实例组模型**（见 §3.4.1，2026-10-14 起取代固定 2 实例互备组） | P0 |
+| FR-H2 | BFE 对指定 cluster 请求该 cluster 分配组的 EPP 实例（当前阶段恒单地址）；BFE failover 机制保留（N 地址通用实现，带滞回：冷却期 + 连续健康检查通过才回切），为未来多实例扩容预留；单实例下实例故障按既有 `BalanceEpp` 语义降级为本地负载均衡 | P0 |
+| FR-H3 | failover/实例切换不丢"已派发"请求语义：重试只针对未派发请求（派发标记机制），容忍在飞请求计量丢失（TTL 自愈） | P1 |
+| FR-H4 | 多实例同组（未来扩容）双活跃可接受不防御：按共享背压有界退化处理，但必须有"同一 cluster 双活跃"告警指标 | P1 |
 
-#### 主备模型与实例组（已对齐）
+#### 单实例组模型与分配（已对齐，2026-10-14）
 
-**第一期：固定 2 实例互备组**。基本单元是"实例组"= 两个 EPP 实例（如 A、B）互为备份：cluster 分配到组后，组内再分为"A 主"和"B 主"两个子集（A 是这些 cluster 的主、B 是备；反之亦然）。分配数据结构为 `cluster → {group, primary}`，备由组内另一实例隐式得出；下发形态为 assignment 全量视图 `map[cluster]{primary, standby}`（同组副本收到的内容完全相同），EPP 侧以本实例 id 逐 cluster 自匹配角色：
+**基本单元是"实例组"，每组恰好 1 个 EPP 实例**（`/epp-pool` 校验收紧，主备双实例不再合法；`instances` 保留数组形态为未来多实例扩容预留）。cluster 的分配粒度为组：`epp_assignments` 只存 `cluster → group`，实例由组派生；下发形态为 assignment 段 `map[cluster]{group}`（所有实例返回相同内容），EPP 侧以**自身组名**逐 cluster 自匹配：
 
 ```
-组 g1 = {epp-A, epp-B}
-  cluster-1 → {g1, primary: epp-A}   （备 = epp-B）
-  cluster-2 → {g1, primary: epp-B}   （备 = epp-A）
+组 g1 = {epp-A}    组 g2 = {epp-C}
+  cluster-1 → {group: g1}
+  cluster-2 → {group: g1}
+  cluster-3 → {group: g2}
 ```
 
-**扩容 = 增加实例组**：新组 {epp-C, epp-D} 加入后，ai-gateway-api 在组间再平衡 cluster（组内 A/B 子集也可再平衡）；已有实例零接触（NFR-5）。组的粒度使反亲和、容量规划、故障域都有自然的边界。
+**扩容 = 增加实例组**：新组 {epp-C} 加入后，ai-gateway-api 在组间再平衡 cluster；已有实例零接触（NFR-5）。组的粒度使反亲和、容量规划、故障域都有自然的边界。多个 cluster 分配到同一组是合法输出。
 
-**单实例（测试）场景**：允许单实例组（组内只有 A），此时所有 cluster 仅有主、无备；BFE 侧 EPPAddr 只配单个地址，主故障时按既有 `BalanceEpp` 回退语义降级为本地负载均衡——测试场景可接受，生产组必须是完整 2 实例。
+**实例故障语义**：组内唯一实例故障时，BFE 侧按既有 `BalanceEpp` 回退语义降级为本地负载均衡；api 侧 reconciler 在容量恢复后自动修复分配。
 
-**组内约束**：同一 cluster 的主备必须是组内两个不同实例（2 实例组天然满足）；跨机架/可用区反亲和为 P2 增强。
+**实例身份约定（自匹配的前提）**：assignment 不再携带实例 id，EPP 以**组名**为身份——启动参数 `-epp-group`（环境变量 `AI_GATEWAY_EPP_GROUP`；**必填、无缺省值，未设置则启动失败**），部署侧须保证与 `/epp-pool` 中组名一致；实例池由 ai-gateway-api OpenAPI `/epp-pool` 静态登记。组名不一致的实例自匹配落空、无 cell 不服务，以 `ai_epp_assignment_no_match` 告警暴露。
 
-**实例身份约定（自匹配的前提）**：EPP 以 StatefulSet 部署，实例 id = **Pod hostname**（启动参数 `-instance-id` 的缺省值，同组副本共享完全相同的启动参数，零 per-instance 配置）；实例池由 ai-gateway-api OpenAPI `/epp-pool` 静态登记（id 取 pod 名）。非 K8s 部署显式传 `-instance-id`；id 与 `/epp-pool` 不一致的实例自匹配落空、无 cell 不服务，须以告警暴露。
+**分配变化与扩缩容（NFR-5 的配套语义）**：分配变化经 InnerAPI 拉取生效，已有实例不重启。匹配结果只有"归我 / 不归我"两种（`resolveAssignmentEntry(self, e) (mine bool)`，无角色概念，`cell.Role` 已删除）：
 
-**角色转换与扩缩容（NFR-5 的配套语义）**：分配变化经 InnerAPI 拉取生效，已有实例不重启。Cell 按角色转换矩阵处理：
+| 旧 \ 新 | 命中（分配给我所属组） | 未命中 |
+|---|---|---|
+| 命中 | 不变（Ensure 幂等） | Drop cell |
+| 未命中 | Ensure 建 cell | 不变 |
 
-| 旧角色 \ 新角色 | 主 | 备 | 无分配 |
-|---|---|---|---|
-| 主 | 不变 | 停止准入（drain），保留数据 | drain 后销毁 |
-| 备 | 开闸即服务 | 不变 | 销毁 |
-
-**再平衡顺序**：EPP **无上报义务**（无 register/心跳/就绪上报）——主备 failover 由 BFE 侧 EPPAddr 连接滞回驱动（FR-H2），ai-gateway-api 不"等就绪再翻转"。分配器只需保证新实例先以"备"角色进入并完成数据同步（standby 热数据冷准入，FR-H5），再翻转主角色即可。
+**再平衡顺序**：EPP **无上报义务**（无 register/心跳/就绪上报）——failover 由 BFE 侧 EPPAddr 连接滞回驱动（FR-H2），ai-gateway-api 不"等就绪再翻转"；分配变化即时生效，cell 冷启动重新收敛。
 
 ### 3.5 与 BFE 的协议配合（FR-B，BFE 侧需求，本项目协调落地）
 
 | 编号 | 需求 | 优先级 |
 |---|---|---|
 | FR-B1 | BFE ext-proc 客户端在 ProcessingRequest metadata 注入 pool 名（`llm-d.ai/inference-pool: <cluster名>`），值即 BFE cluster 名 | P0 |
-| FR-B2 | BFE `EPPAddr` 支持按序主备消费（当前只用 addrs[0]，需改造）+ failover 滞回 | P0 |
+| FR-B2 | BFE `EPPAddr` 按地址列表消费（当前恒单元素）+ failover 滞回（机制保留，为未来多实例扩容预留） | P0 |
 | FR-B3 | 修复 ext-proc 客户端响应体 channel 满静默丢块问题（计量正确性前提） | P0 |
 | FR-B4 | EPP 客户端生产化：TLS 证书校验（替换 InsecureSkipVerify）、多地址、连接复用 | P1 |
 
@@ -164,8 +162,8 @@ cluster_table 的 `Weight` 字段在 EPP 链路上**只生效为注册/摘除开
 |---|---|---|
 | M0：spike | 新仓库最小装配跑通一个请求 | G6 成立；可行性确认（1-2 天） |
 | M1：单 cluster 闭环 | discovery + epp_data/config 轮询 + 单 Cell 引擎 + BFE metadata demux 全链路 | G1、G2、G4（单 cluster 子集）、G6 |
-| M2：热加载 | per-cell 引擎编译切换 + drain + 失败隔离 | G3、G5（主备子集：切换不丢已派发语义） |
-| M3：多 cluster + 实例组主备 | Cell 生命周期 + 组分配与组内主实例下发 + BFE 按序 failover（第一期 2 实例互备组） | G4、G5 完整 |
+| M2：热加载 | per-cell 引擎编译切换 + drain + 失败隔离 | G3、G5（切换不丢已派发语义） |
+| M3：多 cluster + 实例组 | Cell 生命周期 + cluster→组分配下发 + BFE 地址列表 failover（单实例组） | G4、G5 完整 |
 | M4：生产加固 | P1 项（参数热通道、双活跃告警、备 Cell 热备、BFE 客户端生产化）+ NFR 全量压测 | NFR-1 ~ NFR-7 |
 
 ## 8. 关键决策摘要（详见设计文档）
@@ -177,5 +175,5 @@ cluster_table 的 `Weight` 字段在 EPP 链路上**只生效为注册/摘除开
 | 发现源 | InnerAPI cluster_table 轮询，fail-static | 《详细设计-03-Poller与InnerAPI对接.md》 |
 | 配置通道 | InnerAPI `epp_data/config`（epp_config + assignment 两段）+ per-cell 编译切换 | 《详细设计-02-Cell管理与热加载.md》 |
 | demux | BFE ext-proc metadata 注入 pool 名 | 《详细设计-04-Demux与请求路径.md》 |
-| 部署形态 | 实例池 + 每 cluster 主备；脑裂接受、滞回必须 | 《ai-gateway-epp系统设计.md》 |
+| 部署形态 | 实例池 + cluster→组分配；多实例同组双活跃接受、滞回必须 | 《ai-gateway-epp系统设计.md》 |
 | 扩展模型 | Cell 架构（单 EPP 多 cluster） | 《ai-gateway-epp系统设计.md》 |

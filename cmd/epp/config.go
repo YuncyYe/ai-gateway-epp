@@ -18,6 +18,7 @@
 package main
 
 import (
+	"errors"
 	"flag"
 	"os"
 	"time"
@@ -31,8 +32,13 @@ var (
 // Config is the process-level configuration; everything cluster-level comes
 // from ai-gateway-api at runtime, unless LocalConfigDir is set (local debug).
 type Config struct {
-	InstanceID   string
-	APIAddr      string
+	// EppGroup is this instance's identity, matched against the epp_data
+	// assignment section (cluster -> group). It must equal a group name in
+	// /epp-pool and has no default: when empty the instance matches no
+	// cluster (no cells, ai_epp_assignment_no_match=1), so a missing or
+	// wrong value fails loudly instead of silently serving.
+	EppGroup  string
+	APIAddr   string
 	APIToken     string
 	PollInterval time.Duration
 	PollTimeout  time.Duration
@@ -85,7 +91,7 @@ func parseConfig() Config {
 	cfg := Config{}
 	flag.StringVar(&cfg.APIAddr, "api-addr", getenv("AI_GATEWAY_API_ADDR", "http://127.0.0.1:8181/inner-api/v1"), "ai-gateway-api InnerAPI base URL")
 	flag.StringVar(&cfg.APIToken, "api-token", os.Getenv("AI_GATEWAY_API_TOKEN"), "InnerAPI auth token (env AI_GATEWAY_API_TOKEN takes precedence)")
-	flag.StringVar(&cfg.InstanceID, "instance-id", os.Getenv("AI_GATEWAY_EPP_INSTANCE_ID"), "instance identifier for assignment (default: hostname)")
+	flag.StringVar(&cfg.EppGroup, "epp-group", os.Getenv("AI_GATEWAY_EPP_GROUP"), "EPP group name for assignment matching; must equal a group name in /epp-pool (required: startup fails when empty)")
 	flag.DurationVar(&cfg.PollInterval, "poll-interval", 5*time.Second, "poll interval for InnerAPI sync")
 	flag.DurationVar(&cfg.PollTimeout, "poll-timeout", 3*time.Second, "per-request timeout for InnerAPI sync")
 	flag.IntVar(&cfg.GRPCPort, "grpc-port", 9002, "ext-proc gRPC port")
@@ -104,14 +110,18 @@ func parseConfig() Config {
 	flag.StringVar(&cfg.LogLevel, "log-level", getenv("AI_GATEWAY_EPP_LOG_LEVEL", "info"), "log verbosity: info (default), debug, trace")
 	flag.Parse()
 
-	if cfg.InstanceID == "" {
-		if h, err := os.Hostname(); err == nil {
-			cfg.InstanceID = h
-		} else {
-			cfg.InstanceID = "epp"
-		}
-	}
 	return cfg
+}
+
+// Validate rejects a configuration that cannot serve anything. EppGroup has
+// no default: without it the instance matches no cluster in the epp_data
+// assignment (no cells, ai_epp_assignment_no_match=1), so the process fails
+// fast at startup instead of running idle.
+func (c Config) Validate() error {
+	if c.EppGroup == "" {
+		return errors.New("-epp-group is not set: this EPP instance matches no cluster in the epp_data assignment and would serve nothing; set -epp-group / AI_GATEWAY_EPP_GROUP to a group name of /epp-pool")
+	}
+	return nil
 }
 
 func getenv(key, def string) string {

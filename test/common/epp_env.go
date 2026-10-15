@@ -38,7 +38,7 @@ type EppEnv struct {
 
 // StartEPP builds (if needed) and starts the epp binary against the given
 // mock API, waiting for the gRPC port to accept connections.
-func StartEPP(t fatalT, logDir, apiAddr, instanceID string, extraArgs ...string) *EppEnv {
+func StartEPP(t fatalT, logDir, apiAddr, eppGroup string, extraArgs ...string) *EppEnv {
 	t.Helper()
 	bin := EppBinary(t)
 	grpcPort := FindFreePort(t)
@@ -47,7 +47,7 @@ func StartEPP(t fatalT, logDir, apiAddr, instanceID string, extraArgs ...string)
 	args := []string{
 		bin,
 		"-api-addr", apiAddr,
-		"-instance-id", instanceID,
+		"-epp-group", eppGroup,
 		"-poll-interval", "200ms",
 		"-poll-timeout", "1s",
 		"-grpc-port", fmt.Sprint(grpcPort),

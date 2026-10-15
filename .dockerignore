@@ -1,0 +1,24 @@
+# Docker 构建上下文排除项（减小上下文体积、避免把构建产物/密钥拷进镜像）
+# 说明：Dockerfile 需要 go.mod/go.sum、cmd/、pkg/、conf/（本地模式样例配置）与根级 LICENSE/README。
+
+# 构建产物与本地配置输出
+output/
+dist/
+bin/
+epp
+
+# VCS 与工具目录
+.git/
+.gitignore
+.vibecoding/
+aiignore/
+
+# 测试与文档（镜像不需要；测试用例体积大）
+test/
+docs/
+CHANGELOG.md
+*.md
+
+# 临时/备份文件
+*.log
+*.bak

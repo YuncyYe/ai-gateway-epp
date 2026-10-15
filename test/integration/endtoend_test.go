@@ -50,9 +50,6 @@ import (
 	"github.com/rainway-ai-gateway/ai-gateway-epp/pkg/poller"
 )
 
-// sp returns a pointer to s (helper for view construction).
-func sp(s string) *string { return &s }
-
 // registerTestPlugins registers the in-tree plugins the test config uses.
 // Registration is global and idempotent.
 func registerTestPlugins(hub *clustertable.Hub) {
@@ -178,7 +175,7 @@ func TestEndToEnd(t *testing.T) {
 
 	api := newFakeAPI(t)
 	api.setAssignment(map[string]innerapi.AssignmentEntry{
-		"cluster-a": {Primary: sp("epp-test-1")},
+		"cluster-a": {Group: "epp-test-1"},
 	})
 	api.setConfig(map[string]json.RawMessage{"cluster-a": json.RawMessage(eppConfigV1)})
 	api.setTable(map[string]any{
@@ -215,9 +212,6 @@ func TestEndToEnd(t *testing.T) {
 	c, ok := manager.Get("cluster-a")
 	if !ok {
 		t.Fatal("cell not created by assignment")
-	}
-	if c.Role() != cell.RolePrimary {
-		t.Fatalf("role=%v", c.Role())
 	}
 
 	if _, _, cfg, err := watcher.Fetch(ctx, ""); err != nil {

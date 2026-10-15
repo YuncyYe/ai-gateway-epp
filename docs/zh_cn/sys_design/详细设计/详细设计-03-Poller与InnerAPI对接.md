@@ -21,7 +21,7 @@ func (p *Poller[T]) Start(ctx context.Context) error // 阻塞运行；首拉成
 
 **状态机**：`INIT → SYNCING ⇄ BACKOFF(err 指数退避) → SYNCED（常态 tick）`
 
-**fail-static 原则**：`BACKOFF` 期间一切消费行为不变——数据不清理、角色不回退，只退避重试。
+**fail-static 原则**：`BACKOFF` 期间一切消费行为不变——数据不清理、已持有 cell 不释放，只退避重试。
 
 ## 2. innerapi client
 
@@ -63,12 +63,11 @@ for cluster, backends in 全量:
 ```go
 type EppDataConfig struct {
     EppConfig  map[string]json.RawMessage `json:"epp_config"`  // cluster → api 编译后的完整 EndpointPickerConfig
-    Assignment map[string]AssignmentEntry `json:"assignment"`  // cluster → {primary, standby} 全量视图，所有实例相同
+    Assignment map[string]AssignmentEntry `json:"assignment"`  // cluster → {group} 分配的实例组，所有实例相同
 }
 
 type AssignmentEntry struct {
-    Primary *string `json:"primary"`  // 实例 id；null 视为异常（跳过）
-    Standby *string `json:"standby"`  // 实例 id；单实例组为 null
+    Group string `json:"group"`  // 分配的 EPP 实例组名（/epp-pool 中的组名）；空视为异常（跳过）
 }
 ```
 
@@ -77,11 +76,10 @@ type AssignmentEntry struct {
 **自匹配（纯函数，单测覆盖全分支）**：
 
 ```go
-// resolveRole 返回本实例在 cluster 的角色。
-func resolveRole(self string, e AssignmentEntry) (role cell.Role, mine bool) {
-    if e.Primary != nil && *e.Primary == self { return cell.RolePrimary, true }
-    if e.Standby != nil && *e.Standby == self { return cell.RoleStandby, true }
-    return cell.RoleNone, false
+// resolveAssignmentEntry 报告该 cluster 是否归本实例：分配的组 == 本实例组（w.eppgroup）。
+// 无角色概念：命中即服务，未命中即无。
+func resolveAssignmentEntry(self string, e AssignmentEntry) (mine bool) {
+    return e.Group != "" && e.Group == self
 }
 ```
 
@@ -89,25 +87,24 @@ func resolveRole(self string, e AssignmentEntry) (role cell.Role, mine bool) {
 
 ```
 epp_config 段（per-cell 编译切换，算法见详细设计-02 §4）：
-取 本实例有角色的 cluster ∩ EppConfig
+取 本实例命中的 cluster ∩ EppConfig
 for cluster, cfg:
     hash = sha256(canonical(cfg))
     if hash == cell.currentHash: continue
     cell.SwapEngine 路径（见详细设计-02 §4 编译切换算法）
 
-assignment 段（全量视图 → 本地角色视图 → diff 驱动 cell）：
-fetch → 期望集合 = { cluster: role | resolveRole(本实例 id, entry) 命中 }
-for cluster, role in 期望:
+assignment 段（cluster→group 视图 → 本实例命中集合 → diff 驱动 cell）：
+fetch → 期望集合 = { cluster | resolveAssignmentEntry(本实例组名, entry) 命中 }
+for cluster in 期望:
     cell = cells.Get(cluster)
-    无 → cells.Ensure(cluster, role)
-    有且 role 变化 → Promote/Demote（角色矩阵，详细设计-02 §2）
+    无 → cells.Ensure(cluster)        // 幂等
 for cell in cells 不在期望中 → cells.Drop(cluster)
 ```
 
-- **同快照一致性**：epp_config 段与 assignment 段在同一 version 快照内一起应用（先配置后角色，或反之均可），角色与配置不会错配。
-- **一致性规则**：cluster 出现在 epp_config 但 assignment 无本实例角色（或条目缺 primary）→ 跳过 + 指标告警（Cell 就绪需双源齐备）。
-- **未命中任何角色**（`-instance-id` 与 `/epp-pool` 不一致）：全部 cluster 跳过，EPP 无 cell、不服务；启动日志与指标告警 `epp_assignment_no_match`，便于部署排查。
-- **peer 观测**：AssignmentEntry 含同组另一端实例 id（primary 视角的 standby、反之亦然），本期仅输出日志/指标（`epp_assignment_peer`），供未来备 Cell 建联/双活跃自检使用，不建任何连接。
+- **同快照一致性**：epp_config 段与 assignment 段在同一 version 快照内一起应用，命中与配置不会错配。
+- **一致性规则**：cluster 出现在 epp_config 但 assignment 未命中本实例组（或条目 group 为空）→ 跳过 + 指标告警（Cell 就绪需双源齐备）。
+- **未命中任何分配**（`-epp-group` 与 `/epp-pool` 组名不一致）：全部 cluster 跳过，EPP 无 cell、不服务；启动日志与指标告警 `ai_epp_assignment_no_match`，便于部署排查。
+- **无 peer 概念**：单实例组恒无对端，原 `peerID`/"assignment peer" 日志已删除。
 - **无上报义务**：EPP 不注册、不心跳、不就绪上报——failover 由 BFE 侧 EPPAddr 连接滞回驱动，api 侧不"等就绪再翻转"；原 `POST /configs/epp_data/assignment/report`（ReadyReport）已随 api 侧端点取消同步删除。
 
 ## 5. 失败矩阵
@@ -118,4 +115,4 @@ for cell in cells 不在期望中 → cells.Drop(cluster)
 | 首拉未成功 | server 不就绪（gRPC health 非 SERVING） |
 | 持续不可用 | fail-static：全部沿用最后已知状态（NFR-4：30 分钟无劣化） |
 | 数据形状错误（契约破坏） | 单轮丢弃 + error 指标，不等 version 前进（防脏数据固化） |
-| 本实例 id 未命中 assignment 任何角色 | 全部 cluster 跳过、无 cell 不服务；`epp_assignment_no_match` 告警（部署核对 `-instance-id` 与 `/epp-pool`） |
+| 本实例组名未命中 assignment 任何条目 | 全部 cluster 跳过、无 cell 不服务；`ai_epp_assignment_no_match` 告警（部署核对 `-epp-group` 与 `/epp-pool` 组名） |

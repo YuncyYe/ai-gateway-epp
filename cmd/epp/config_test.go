@@ -46,7 +46,7 @@ func clearConfigEnv(t *testing.T) {
 	for _, key := range []string{
 		"AI_GATEWAY_API_ADDR",
 		"AI_GATEWAY_API_TOKEN",
-		"AI_GATEWAY_EPP_INSTANCE_ID",
+		"AI_GATEWAY_EPP_GROUP",
 		"AI_GATEWAY_EPP_TLS_CERT",
 		"AI_GATEWAY_EPP_TLS_KEY",
 		"NAMESPACE",
@@ -129,13 +129,56 @@ func TestParseConfigDefaults(t *testing.T) {
 		t.Error("AllowExperimentalPlugins = true, want false")
 	}
 
-	// InstanceID falls back to the hostname when neither env nor flag set it.
-	host, err := os.Hostname()
-	if err != nil {
-		t.Skipf("hostname unavailable: %v", err)
+	// EppGroup has no default: an unset group stays empty so a missing
+	// configuration fails loudly (matches nothing) instead of silently
+	// falling back to the hostname.
+	if cfg.EppGroup != "" {
+		t.Errorf("EppGroup = %q, want empty when neither env nor flag set it", cfg.EppGroup)
 	}
-	if cfg.InstanceID != host {
-		t.Errorf("InstanceID = %q, want hostname %q", cfg.InstanceID, host)
+}
+
+func TestConfigValidate(t *testing.T) {
+	// Unset group: fail fast (the instance would serve nothing).
+	if err := (Config{}).Validate(); err == nil {
+		t.Fatal("Validate() = nil, want an error when EppGroup is empty")
+	}
+
+	// Configured group: valid.
+	if err := (Config{EppGroup: "g1"}).Validate(); err != nil {
+		t.Fatalf("Validate() = %v, want nil for a configured group", err)
+	}
+}
+
+func TestParseConfigEppGroup(t *testing.T) {
+	origFlags := flag.CommandLine
+	t.Cleanup(func() { flag.CommandLine = origFlags })
+
+	// Flag wins over everything.
+	clearConfigEnv(t)
+	flag.CommandLine = flag.NewFlagSet("test", flag.ContinueOnError)
+	os.Args = []string{"epp", "-epp-group", "g-flag"}
+	cfg := parseConfig()
+	if cfg.EppGroup != "g-flag" {
+		t.Errorf("EppGroup = %q, want flag value g-flag", cfg.EppGroup)
+	}
+
+	// Env applies when the flag is absent.
+	clearConfigEnv(t)
+	t.Setenv("AI_GATEWAY_EPP_GROUP", "g-env")
+	flag.CommandLine = flag.NewFlagSet("test", flag.ContinueOnError)
+	os.Args = []string{"epp"}
+	cfg = parseConfig()
+	if cfg.EppGroup != "g-env" {
+		t.Errorf("EppGroup = %q, want env value g-env", cfg.EppGroup)
+	}
+
+	// Empty everywhere: stays empty (no hostname fallback).
+	clearConfigEnv(t)
+	flag.CommandLine = flag.NewFlagSet("test", flag.ContinueOnError)
+	os.Args = []string{"epp"}
+	cfg = parseConfig()
+	if cfg.EppGroup != "" {
+		t.Errorf("EppGroup = %q, want empty (no default)", cfg.EppGroup)
 	}
 }
 
@@ -143,7 +186,7 @@ func TestParseConfigEnvOverrides(t *testing.T) {
 	clearConfigEnv(t)
 	t.Setenv("AI_GATEWAY_API_ADDR", "http://api.example.com/inner-api/v1")
 	t.Setenv("AI_GATEWAY_API_TOKEN", "env-token")
-	t.Setenv("AI_GATEWAY_EPP_INSTANCE_ID", "epp-env-instance")
+	t.Setenv("AI_GATEWAY_EPP_GROUP", "epp-env-group")
 	t.Setenv("AI_GATEWAY_EPP_TLS_CERT", "/env/cert.pem")
 	t.Setenv("AI_GATEWAY_EPP_TLS_KEY", "/env/key.pem")
 	t.Setenv("NAMESPACE", "env-namespace")
@@ -156,8 +199,8 @@ func TestParseConfigEnvOverrides(t *testing.T) {
 	if cfg.APIToken != "env-token" {
 		t.Errorf("APIToken = %q, want env value", cfg.APIToken)
 	}
-	if cfg.InstanceID != "epp-env-instance" {
-		t.Errorf("InstanceID = %q, want env value", cfg.InstanceID)
+	if cfg.EppGroup != "epp-env-group" {
+		t.Errorf("EppGroup = %q, want env value", cfg.EppGroup)
 	}
 	if cfg.GRPCTLSCertFile != "/env/cert.pem" || cfg.GRPCTLSKeyFile != "/env/key.pem" {
 		t.Errorf("TLS files = %q/%q, want env values", cfg.GRPCTLSCertFile, cfg.GRPCTLSKeyFile)
@@ -171,13 +214,13 @@ func TestParseConfigFlagsOverrideEnv(t *testing.T) {
 	clearConfigEnv(t)
 	t.Setenv("AI_GATEWAY_API_ADDR", "http://env.example.com")
 	t.Setenv("AI_GATEWAY_API_TOKEN", "env-token")
-	t.Setenv("AI_GATEWAY_EPP_INSTANCE_ID", "env-instance")
+	t.Setenv("AI_GATEWAY_EPP_GROUP", "env-group")
 	t.Setenv("NAMESPACE", "env-namespace")
 
 	cfg := parseConfigForTest(t,
 		"-api-addr", "http://flag.example.com",
 		"-api-token", "flag-token",
-		"-instance-id", "flag-instance",
+		"-epp-group", "flag-group",
 		"-pool-namespace", "flag-namespace",
 	)
 
@@ -187,8 +230,8 @@ func TestParseConfigFlagsOverrideEnv(t *testing.T) {
 	if cfg.APIToken != "flag-token" {
 		t.Errorf("APIToken = %q, want flag value", cfg.APIToken)
 	}
-	if cfg.InstanceID != "flag-instance" {
-		t.Errorf("InstanceID = %q, want flag value", cfg.InstanceID)
+	if cfg.EppGroup != "flag-group" {
+		t.Errorf("EppGroup = %q, want flag value", cfg.EppGroup)
 	}
 	if cfg.PoolNamespace != "flag-namespace" {
 		t.Errorf("PoolNamespace = %q, want flag value", cfg.PoolNamespace)

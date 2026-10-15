@@ -1,0 +1,63 @@
+{
+  "epp_config": {
+    "cluster-a": {
+		  "featureGates": ["flowControl"],
+		  "plugins": [
+			{ "name": "ep-discover", "type": "cluster-table-discovery", "parameters": { "clusterName": "cluster-a" } },
+			{ "name": "util-filter", "type": "utilization-filter",
+			  "parameters": { "conditions": [ { "metric": "kv-cache-utilization", "maxValue": 0.9 } ],
+							  "fallbackOnEmpty": false } },
+			{ "name": "saturation-detector", "type": "utilization-detector",
+			  "parameters": { "kvCacheUtilThreshold": 0.9, "queueDepthThreshold": 5,
+							  "stalenessPolicy": "ignore", "headroom": 0.0,
+							  "metricsStalenessThreshold": "200ms" } },
+			{ "name": "kv-scorer", "type": "kv-cache-utilization-scorer", "parameters": {} },
+			{
+			  "name": "session-scorer", "type": "session-affinity-scorer", 
+				"parameters": {
+				  "strategy": "session_id",
+				  "sessionIdConfig": { "sources": [{ "header": "x-session-id" }] }
+				}
+			},
+			{ "name": "queue-scorer", "type": "queue-scorer", "parameters": {} },
+			{ "name": "prefix-scorer", "type": "prefix-cache-scorer", "parameters": {} },
+			{ "name": "max-score", "type": "max-score-picker", "parameters": {} },
+			{ "name": "openai-parser", "type": "openai-parser", "parameters": {} }	  
+		  ],
+		  "schedulingProfiles": [
+			{
+			  "name": "default",
+			  "plugins": [
+				{ 	"pluginRef": "util-filter"},
+				{   "pluginRef": "kv-scorer", "weight": 0.6},			
+				{   "pluginRef": "session-scorer", "weight": 0.8},
+				{   "pluginRef": "queue-scorer", "weight": 0.6},
+				{   "pluginRef": "prefix-scorer", "weight": 0.6},
+				{   "pluginRef": "max-score", "weight": null}
+			  ]
+			}
+		  ],
+		  "dataLayer": {
+			"discovery": { "endpoints": { "pluginRef": "ep-discover" } }
+		  },
+		  "flowControl": {
+				"maxRequests": "5",
+				"defaultRequestTTL": "10s",
+				"noEndpointRequestTTL": "10m0s",
+				"enableEviction": false,
+				"saturationDetector": { "pluginRef": "saturation-detector" },
+				"priorityBands": [{ "priority": 0, "maxRequests": "5", "maxBytes":"100Mi" }]		  
+		  }, 
+		  "requestHandler": {
+			"parsers": [
+			  { "pluginRef": "openai-parser" }
+			]
+		  }
+		}
+  },
+  "assignment": {
+    "cluster-a": {
+      "group": "epp-sc15-tc10"
+    }
+  }
+}

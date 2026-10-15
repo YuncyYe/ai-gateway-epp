@@ -35,8 +35,8 @@ var (
 	cellStateGauge = prometheus.NewGaugeVec(prometheus.GaugeOpts{
 		Namespace: "ai_epp",
 		Name:      "cell_state",
-		Help:      "Cell state by cluster, role and state; 1 for the current combination.",
-	}, []string{"cluster", "role", "state"})
+		Help:      "Cell state by cluster and state; 1 for the current combination.",
+	}, []string{"cluster", "state"})
 
 	drainDuration = prometheus.NewHistogramVec(prometheus.HistogramOpts{
 		Namespace: "ai_epp",

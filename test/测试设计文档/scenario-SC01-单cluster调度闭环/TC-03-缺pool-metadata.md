@@ -12,12 +12,12 @@
 
 ## 运行模式
 
-单组件进程组：epp（真实进程）×1（instance-id `epp-sc01-tc03`）+ inference-sim（真实进程）×1（逻辑名 `a0`）+ ai-gateway-api mock + BFE 由测试代码扮演。
+单组件进程组：epp（真实进程）×1（epp-group `epp-sc01-tc03`）+ inference-sim（真实进程）×1（逻辑名 `a0`）+ ai-gateway-api mock + BFE 由测试代码扮演。
 
 ## 前置条件
 
 1. harness 已构建 epp 二进制；inference-sim 二进制可用。
-2. mock API 已配置 assignment 全量视图（cluster-a → 本实例 primary）、epp_config（cluster-a 最小配置）、cluster_table（1 个 sim 后端 `a0`，Weight=50）。
+2. mock API 已配置 assignment 段（cluster-a → 本实例组）、epp_config（cluster-a 最小配置）、cluster_table（1 个 sim 后端 `a0`，Weight=50）。
 3. epp 启动未配置 default-pool，health=SERVING。
 
 ## 测试步骤

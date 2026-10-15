@@ -47,9 +47,6 @@ func newTestCell(t *testing.T, key Key) *Cell {
 func TestCellInitialState(t *testing.T) {
 	c := newTestCell(t, "cell-init")
 
-	if c.Role() != RoleNone {
-		t.Errorf("Role() = %v, want RoleNone", c.Role())
-	}
 	if c.State() != StateCreating {
 		t.Errorf("State() = %v, want StateCreating", c.State())
 	}
@@ -70,7 +67,7 @@ func TestCellInitialState(t *testing.T) {
 }
 
 func TestMarkReady(t *testing.T) {
-	t.Run("creating to standby", func(t *testing.T) {
+	t.Run("creating to active", func(t *testing.T) {
 		c := newTestCell(t, "cell-ready-1")
 		c.markReady()
 
@@ -82,8 +79,8 @@ func TestMarkReady(t *testing.T) {
 		if c.ReadySince().IsZero() {
 			t.Error("ReadySince() still zero after markReady")
 		}
-		if c.State() != StateStandby {
-			t.Errorf("State() = %v, want StateStandby", c.State())
+		if c.State() != StateActive {
+			t.Errorf("State() = %v, want StateActive", c.State())
 		}
 	})
 
@@ -99,10 +96,10 @@ func TestMarkReady(t *testing.T) {
 
 	t.Run("does not clobber later state", func(t *testing.T) {
 		c := newTestCell(t, "cell-ready-3")
-		c.setState(StatePrimary)
+		c.setState(StateDraining)
 		c.markReady()
-		if c.State() != StatePrimary {
-			t.Errorf("State() = %v, want StatePrimary preserved", c.State())
+		if c.State() != StateDraining {
+			t.Errorf("State() = %v, want StateDraining preserved", c.State())
 		}
 	})
 }

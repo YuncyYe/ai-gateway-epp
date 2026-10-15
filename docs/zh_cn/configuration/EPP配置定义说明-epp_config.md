@@ -3,7 +3,7 @@
 本文档定义 ai-gateway-epp 通过 ai-gateway-api InnerAPI **`epp_data/config`** 接口下发的配置结构。Config 含两段：
 
 - **`epp_config`**：`map[cluster名]EndpointPickerConfig`——cluster 的调度策略配置（"怎么调度"），即本文 §3-§9 定义的结构。EPP 侧复用 llm-d `EndpointPickerConfig`（`llm-d-router/apix/config/v1alpha1/endpointpickerconfig_types.go`）的严格解码与校验管线。
-- **`assignment`**：`map[cluster名]{primary, standby}`——cluster 的 EPP 实例角色**全量视图**（"由哪个 EPP 服务"），所有 EPP 实例返回完全相同的内容，由 EPP 以自身实例 id 自匹配得出角色。
+- **`assignment`**：`map[cluster名]{group}`——cluster 到 **EPP 实例组**的分配映射（"由哪个实例组服务"，分配粒度为组，当前阶段每组恰好 1 实例），所有 EPP 实例返回完全相同的内容，由 EPP 以**自身组名**自匹配得出归属（无角色概念，见 §1.1）。
 
 **配置来源**：OpenAPI 用户侧（`/clusters` 的 `epp_config` 字段）是**简化用户形态**（调度档位 + 少量一等公民参数），由 ai-gateway-api 在导出时**确定性编译**为本文定义的 `EndpointPickerConfig`（出厂即合法）。用户侧字段定义与编译规则见 ai-gateway-api 侧改造文档 `api-changes.md` §3.2.1（`ai-gateway-api/design-docs/modifications/2026-09-08-epp-scheduling-integration/`），本文不重复。本文是 EPP 消费的**编译后形态**权威定义。
 
@@ -33,8 +33,8 @@ GET /configs/epp_data/config?version=<上次版本号>
                 "cluster-b": { /* EndpointPickerConfig */ }
             },
             "assignment": {
-                "cluster-a": { "primary": "epp-0", "standby": "epp-1" },
-                "cluster-c": { "primary": "epp-2", "standby": null }
+                "cluster-a": { "group": "epp-local" },
+                "cluster-c": { "group": "epp-local" }
             }
         }
     },
@@ -43,9 +43,9 @@ GET /configs/epp_data/config?version=<上次版本号>
 ```
 
 - `epp_config` 的 key 与 BFE cluster 名、cluster_table 的 key 完全一致。
-- **两段同一 version 快照**：一次拉取原子获得某 version 下的调度配置与角色视图，不存在跨端点偏移。
-- `assignment` 为全量视图：EPP 以自身实例 id（`-instance-id`，缺省 hostname；StatefulSet 部署约定见 ai-gateway-api 侧 `api-changes.md` §3.1）逐 cluster 匹配——`primary == 本实例 id` → Primary；`standby == 本实例 id` → Standby；均未命中 → 跳过该 cluster。
-- 异常态：`epp_config` 中存在但 `assignment` 中无条目的 cluster = 未分配（api 侧 server_data_conf 导出已拒绝该状态）；EPP 侧本地告警、不为该 cluster 建 cell。
+- **两段同一 version 快照**：一次拉取原子获得某 version 下的调度配置与分配映射，不存在跨端点偏移。
+- `assignment` 为全量映射：EPP 以**自身组名**（`-epp-group`，环境变量 `AI_GATEWAY_EPP_GROUP`，无缺省值、必须显式配置；须与 `/epp-pool` 组名一致）逐 cluster 匹配——`group == 本实例组名` → 该 cluster 归本实例服务；均未命中 → 跳过该 cluster。匹配判定为 `resolveAssignmentEntry(self, e) (mine bool)`，**无角色概念**（原 primary/standby 字段已删除）。
+- 异常态：`epp_config` 中存在但 `assignment` 中无条目的 cluster = 未分配（api 侧 server_data_conf 导出已拒绝该状态）；EPP 侧本地告警（`ai_epp_assignment_no_match`）、不为该 cluster 建 cell。
 - 配置未变化时 `Data: null`；EPP 拉取失败时 fail-static，沿用旧配置。
 
 ### 1.2 本地文件模式（`--local-config-dir`）
@@ -60,7 +60,7 @@ GET /configs/epp_data/config?version=<上次版本号>
 |---|---|---|---|
 | `cluster_table.json` | `GET /configs/gslb_data/cluster_table` | `map[cluster]map[subCluster][]BackendConf`（RS 列表） | **是**（`ClusterDiscovery`） |
 | `epp_data_config.json` | `GET /configs/epp_data/config` | `{ "epp_config": ..., "assignment": ... }`（本文 §3-§9 + assignment） | **是**（`EppDataWatcher`） |
-| `epp_pool.json` | `GET /open-api/v1/epp-pool` | EPP 实例池定义（实例组 + 实例列表） | 否（仅参考/自检；EPP 经 `assignment` 段间接引用实例 id） |
+| `epp_pool.json` | `GET /open-api/v1/epp-pool` | EPP 实例池定义（实例组 + 实例列表） | 否（仅参考/自检；EPP 经 `assignment` 段的 `group` 与组名对应） |
 
 **文件格式**：直接对应 InnerAPI 响应中 **`Data.Config` 层**，**跳过外部 envelope**（即不含 `ErrNum/ErrMsg/Data/Version/WorkMode`）。因此：
 
@@ -68,7 +68,7 @@ GET /configs/epp_data/config?version=<上次版本号>
   ```json
   {
     "epp_config": { "cluster-a": { /* EndpointPickerConfig，见 §3 */ } },
-    "assignment": { "cluster-a": { "primary": "epp-0", "standby": "epp-1" } }
+    "assignment": { "cluster-a": { "group": "epp-local" } }
   }
   ```
 - `cluster_table.json`（对应 `ClusterTableConfig`，即 `map[cluster]map[subCluster][]BackendConf`；`Weight=0` 视为摘除）：
@@ -82,7 +82,7 @@ GET /configs/epp_data/config?version=<上次版本号>
     }
   }
   ```
-- `epp_pool.json`（不消费，仅调试参考；`id` 应与 `assignment` 中的实例 id 一致）：
+- `epp_pool.json`（不消费，仅调试参考；组名应与 `assignment` 中的 `group` 一致，每组恰 1 实例）：
   ```json
   {
     "name": "EPP.pool",
@@ -96,17 +96,18 @@ GET /configs/epp_data/config?version=<上次版本号>
 
 - 本地文件无 server-side version：每次轮询（`--poll-interval`，默认 5s）重新读取文件，`Fetch` 恒返回 `changed=true`、`newVersion` 为空。因此**修改文件后在下一个轮询周期内自动生效**（无需重启），但**无 inotify 文件监听、无 HTTP reload 入口**。
 - 读取失败或 JSON 解析失败 → 返回 error，继承 poller fail-static 语义：**不更新状态、指数退避重试、沿用上一份成功配置**。
-- 下游链路与 InnerAPI 模式完全一致：`epp_config` 仍按 §2 做 per-cell 编译-切换，`assignment` 仍以 `-instance-id` 自匹配角色。`epp_pool.json` 不参与运行时校验。
+- 下游链路与 InnerAPI 模式完全一致：`epp_config` 仍按 §2 做 per-cell 编译-切换，`assignment` 仍以 `-epp-group` 自匹配归属。`epp_pool.json` 不参与运行时校验。
 
 **相关进程级参数**：
 
 | 参数 | 环境变量 | 默认 | 说明 |
 |---|---|---|---|
+| `--epp-group` | `AI_GATEWAY_EPP_GROUP` | 空（必填） | 实例身份（assignment 自匹配），须与 `/epp-pool` 组名一致；未设置则启动失败（fail-fast） |
 | `--local-config-dir` | `AI_GATEWAY_EPP_LOCAL_CONFIG_DIR` | 空 | 本地配置目录；非空即启用本地文件模式 |
 | `--poll-interval` | — | `5s` | 轮询（含本地文件重读）间隔 |
 | `--log-level` | `AI_GATEWAY_EPP_LOG_LEVEL` | `info` | 日志级别：`info`（仅 EPP V(0)）/ `debug`（含 llm-d-router DEFAULT）/ `trace`（含 llm-d-router TRACE） |
 
-## 2. 配置的角色与生效方式
+## 2. 配置的编译与生效方式
 
 每 cluster 的配置独立编译为一个调度引擎（Engine）：**plugins 实例化 → 调度 profile 组装 → 流控参数注入**，编译成功后原子切换（详见《EPP对接ai-gateway-api配置中心与热加载方案》）。本配置是**声明层 API**：ai-gateway-api 的编译模板保证结构合法、引用完整、DAG 无环（出厂即合法）；EPP 编译期校验作为防御兜底——编译失败该 cluster 沿用旧引擎，不影响其他 cluster。
 
@@ -215,10 +216,10 @@ GET /configs/epp_data/config?version=<上次版本号>
 | 字段 | 必填 | 说明 |
 |---|---|---|
 | discovery.endpoints.pluginRef | 是（本项目） | 端点发现插件。本项目固定使用 `cluster-table-discovery`（ai-gateway-epp 自研，对接 cluster_table InnerAPI）；**设置后 EPP 完全绕过 K8s CRD reconciler**（`endpointpickerconfig_types.go:267-273`） |
-| discovery.peers | 否 | 对端 EPP 发现插件，实例组互备场景第二期引入 |
+| discovery.peers | 否 | 对端 EPP 发现插件，多实例同组（未来扩容）场景第二期引入 |
 | injectDefaults | 否 | 默认 true：自动注入默认指标 source/extractor（EPP 周期性抓取后端 `/metrics`，本地内存缓存）；false 则全部手动声明 |
 | sources[].pluginRef / extractors[].pluginRef | 否 | 指标采集源与提取器（source → extractor 一对多）；缺省由 injectDefaults 补齐 |
-| crossReplicaSyncerPluginRef | 否 | 跨副本同步插件；实例组内成员间共享端点状态时用（采集去重，见《EPP代码分析/02-数据层与状态同步》§2.6）。本期不启用 |
+| crossReplicaSyncerPluginRef | 否 | 跨副本同步插件；多实例同组成员间共享端点状态时用（采集去重，见《EPP代码分析/02-数据层与状态同步》§2.6）。本期不启用 |
 | crossReplicaSyncInterval / crossReplicaPublishTimeout | 否 | 发布节奏与单次发布超时，缺省用系统默认 |
 
 ## 7. flowControl：流控
@@ -262,7 +263,7 @@ GET /configs/epp_data/config?version=<上次版本号>
 | fairnessPolicyRef | 否 | 流间公平策略，默认 `global-strict-fairness-policy` |
 | orderingPolicyRef | 否 | 流内排序策略，默认 `fcfs-ordering-policy` |
 
-**流控实现说明**：全部由 EPP 进程内 flow controller 实现、状态为本地内存（per-pool 优先级队列 + 在飞计数），无外部存储；failover 切换后队列与在飞计数清零，新 primary 从零开始（排队中请求由 BFE 侧断连/重试处理）。
+**流控实现说明**：全部由 EPP 进程内 flow controller 实现、状态为本地内存（per-pool 优先级队列 + 在飞计数），无外部存储；实例故障切换后队列与在飞计数清零，承接实例从零开始（排队中请求由 BFE 侧断连/重试处理）。
 
 ## 8. requestHandler：请求解析
 
@@ -353,10 +354,10 @@ GET /configs/epp_data/config?version=<上次版本号>
       }
     },
     "assignment": {
-      "llm-cluster-a": { "primary": "epp-0", "standby": "epp-1" }
+      "llm-cluster-a": { "group": "epp-local" }
     }
   }
 }
 ```
 
-注：`cluster-table-discovery` 为 ai-gateway-epp 自研插件（见《EPP对接InnerAPI-cluster-table改造方案》），其 parameters（apiAddr/token 等）在进程级配置给出，cluster 级配置只需引用插件名——上例中 `clusterName` 亦可省略（默认取 demux 到的 pool 名）。assignment 中的实例 id 与 `/epp-pool` 登记一致（StatefulSet 部署时即 pod hostname）。
+注：`cluster-table-discovery` 为 ai-gateway-epp 自研插件（见《EPP对接InnerAPI-cluster-table改造方案》），其 parameters（apiAddr/token 等）在进程级配置给出，cluster 级配置只需引用插件名——上例中 `clusterName` 亦可省略（默认取 demux 到的 pool 名）。assignment 中的 `group` 为 `/epp-pool` 中的组名（每组恰 1 实例，StatefulSet 部署时实例 id 即 pod hostname）；本实例以 `-epp-group`（必填，无缺省值，未设置则启动失败）与之匹配。

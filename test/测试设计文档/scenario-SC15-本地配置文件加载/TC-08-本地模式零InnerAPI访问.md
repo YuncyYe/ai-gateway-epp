@@ -18,7 +18,7 @@
 
 1. mock API 已启动（不配置任何 epp_config/assignment/cluster_table，仅计数）。
 2. 本地配置目录三份文件齐备，可正常加载。
-3. epp 以 `--local-config-dir=<dir> -api-addr=<mock.Addr> -instance-id=<本实例>` 启动。
+3. epp 以 `--local-config-dir=<dir> -api-addr=<mock.Addr> -epp-group=<本实例组>` 启动。
 
 ## 测试步骤
 
